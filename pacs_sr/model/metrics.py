@@ -44,13 +44,31 @@ def ssim3d_slicewise(pred: np.ndarray, target: np.ndarray, mask: Optional[np.nda
         else:
             ps, ts = p[:, :, i], t[:, :, i]
             ms = m[:, :, i] if m is not None else None
+
+        # Skip slices with no foreground voxels
+        if ms is not None and not np.any(ms):
+            continue
+
         if ms is not None:
             # compute SSIM only on masked region by zeroing outside
             # note: structural_similarity requires same shape arrays
             ps = ps * ms
             ts = ts * ms
-        scores.append(structural_similarity(ts, ps, data_range=float(ts.max() - ts.min()) if ts.size else 1.0))
-    return float(np.mean(scores)) if scores else float("nan")
+
+        # Calculate data range with safeguards
+        data_range = float(ts.max() - ts.min())
+        if data_range < 1e-7:  # Avoid division by zero or near-zero values
+            continue
+
+        try:
+            score = structural_similarity(ts, ps, data_range=data_range)
+            if not np.isnan(score):
+                scores.append(score)
+        except Exception:
+            # Skip slices that cause errors in SSIM computation
+            continue
+
+    return float(np.mean(scores)) if scores else 0.0
 
 def mae(pred: np.ndarray, target: np.ndarray, mask: Optional[np.ndarray]=None) -> float:
     if mask is not None:

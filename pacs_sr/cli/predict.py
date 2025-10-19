@@ -17,6 +17,7 @@ import nibabel as nib
 
 from pacs_sr.config.config import load_full_config
 from pacs_sr.utils.patches import region_labels
+from pacs_sr.utils.registration import apply_brain_mask
 
 
 def parse_args():
@@ -68,6 +69,12 @@ This will:
         default=16,
         help="Stride used during training (default: 16)"
     )
+    parser.add_argument(
+        "--pulse",
+        type=str,
+        default=None,
+        help="Pulse sequence name (t1c, t1n, t2w, t2f) - required if using brain masking"
+    )
     return parser.parse_args()
 
 
@@ -103,7 +110,10 @@ def blend_predictions(
     weights_dict: Dict[int, np.ndarray],
     patch_size: int,
     stride: int,
-    model_order: list
+    model_order: list,
+    pulse: str = None,
+    use_registration: bool = False,
+    atlas_dir: Path = None
 ) -> np.ndarray:
     """
     Blend expert predictions using learned regional weights.
@@ -114,6 +124,9 @@ def blend_predictions(
         patch_size: Patch size used during training
         stride: Stride used during training
         model_order: Order of models (must match weight vector order)
+        pulse: Pulse sequence name (needed for brain masking)
+        use_registration: Whether to apply brain masking
+        atlas_dir: Atlas directory containing brain mask
 
     Returns:
         Blended prediction array
@@ -150,6 +163,11 @@ def blend_predictions(
         # Linear blend: blend[sel] = sum_i w[i] * X[i, sel]
         tile = np.tensordot(w.astype(np.float32), X[:, sel], axes=(0, 0))
         blended[sel] = tile
+
+    # Apply brain mask to set out-of-brain voxels to 0 (fixes tiling artifacts)
+    if use_registration and atlas_dir is not None and pulse is not None:
+        mask_cache = {}
+        blended = apply_brain_mask(blended, pulse, atlas_dir, mask_cache)
 
     return blended
 
@@ -228,9 +246,14 @@ def main():
             weights_dict=weights_dict,
             patch_size=args.patch_size,
             stride=args.stride,
-            model_order=model_order
+            model_order=model_order,
+            pulse=args.pulse,
+            use_registration=full_config.pacs_sr.use_registration,
+            atlas_dir=full_config.pacs_sr.atlas_dir
         )
         print(f"  ✓ Blended shape: {blended.shape}")
+        if full_config.pacs_sr.use_registration and args.pulse:
+            print(f"  ✓ Applied brain mask for pulse: {args.pulse}")
     except Exception as e:
         print(f"Error blending predictions: {e}", file=sys.stderr)
         import traceback

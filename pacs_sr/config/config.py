@@ -50,12 +50,16 @@ class PacsSRConfig:
     edge_power: float
     # normalization
     normalize: str
+    # registration
+    use_registration: bool
+    atlas_dir: Optional[Path]
     # compute
     num_workers: int
     device: str
     # metrics
     compute_lpips: bool
     ssim_axis: str
+    evaluate_train: bool
     # saving
     save_weight_volumes: bool
     save_blends: bool
@@ -125,10 +129,13 @@ def load_pacs_sr_config(config_dict: dict, data_config: Optional[DataConfig] = N
         lambda_edge=float(config_dict["lambda_edge"]),
         edge_power=float(config_dict["edge_power"]),
         normalize=str(config_dict["normalize"]),
+        use_registration=bool(config_dict.get("use_registration", False)),
+        atlas_dir=Path(config_dict["atlas_dir"]) if "atlas_dir" in config_dict and config_dict["atlas_dir"] else None,
         num_workers=int(config_dict["num_workers"]),
         device=str(config_dict["device"]),
         compute_lpips=bool(config_dict["compute_lpips"]),
         ssim_axis=str(config_dict["ssim_axis"]),
+        evaluate_train=bool(config_dict.get("evaluate_train", True)),
         save_weight_volumes=bool(config_dict["save_weight_volumes"]),
         save_blends=bool(config_dict["save_blends"]),
         log_level=str(config_dict.get("log_level", "INFO")),

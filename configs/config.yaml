@@ -9,6 +9,15 @@ data:
   seed: 42
   out: /media/mpascual/PortableSSD/Meningiomas/tasks/superresolution/kfolds_manifest.json
 
+registration:
+  atlas: /media/mpascual/PortableSSD/Meningiomas/ATLAS/sri24_spm8/templates
+  t1: T1_brain.nii
+  t2: T2_brain.nii
+  epi: EPI_brain.nii
+  pd: PD_brain.nii
+  # To get the brain mask, just compute the largest connected component of the atlas T1 thresholded at 0.1. 
+  brain_mask: brain_mask.nii
+
 pacs_sr:
   # Experiment identity
   experiment_name: "PaCS-SR_first_draft"
@@ -24,12 +33,16 @@ pacs_sr:
   edge_power: 2.0
   # Normalization
   normalize: "zscore"   # ['zscore'] for now
+  # Registration
+  use_registration: false  # enable atlas-based registration and brain masking
+  atlas_dir: /media/mpascual/PortableSSD/Meningiomas/ATLAS/sri24_spm8/templates
   # I/O and compute
-  num_workers: 4        # parallel workers for per-patient evaluation
+  num_workers: 6        # parallel workers for per-patient evaluation
   device: "cpu"         # reserved for future GPU-assisted ops
   # Metrics
   compute_lpips: false  # requires torch + lpips; optional
   ssim_axis: "axial"    # 'axial' | 'coronal' | 'sagittal' slice-wise averaging
+  evaluate_train: true  # compute metrics on train set (can disable for speed)
   # Saving
   save_weight_volumes: true    # save per-expert tiled weight maps as compressed NPZ for inspection
   save_blends: true            # save blended predictions
@@ -38,7 +51,7 @@ pacs_sr:
   log_to_file: true            # save logs to file in output directory
   log_region_freq: 10          # log region optimization progress every N regions
   # Output directory
-  out_root: /media/mpascual/PortableSSD/Meningiomas/tasks/superresolution/pacs_sr/output
+  out_root: /media/mpascual/PortableSSD/Meningiomas/tasks/superresolution/results/PACS_SR
 
 predict:
   pacs_sr_weights_path: "/path/to/saved/pacs_sr/weights.npy"

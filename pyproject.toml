@@ -9,7 +9,11 @@ description = "Patchwise Convex Stacking for 3D MRI Super-Resolution under Clini
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [
-  { name="PaCS-SR Authors", email="author@example.com" },
+  { name="Mario Pascual-González", email="mpascual@uma.es" },
+  { name="Ezequiel López-Rubio", email="elr@uma.es" },
+  { name="Francisco Sendra-Portero", email="sendra@uma.es" },
+  { name="Almudena Pérez Lara", email="almudenaperezlara@gmail.com" },
+  { name="Beatriz Asenjo García", email="asenjob@gmail.com" },
 ]
 dependencies = [
   "numpy>=1.23",
@@ -18,6 +22,8 @@ dependencies = [
   "scikit-image>=0.21",
   "joblib>=1.3",
   "pyyaml>=6.0",
+  "tqdm>=4.65",
+  "antspyx>=0.3.8",
 ]
 
 [project.optional-dependencies]

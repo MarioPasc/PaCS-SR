@@ -185,16 +185,16 @@ def build_manifest(cfg: BuilderConfig) -> Dict:
     patients = list_patients_with_complete_coverage(cfg)
     assert len(patients) >= cfg.k_folds, "Not enough patients for requested K folds"
     folds = kfold_split(patients, cfg.k_folds, cfg.seed)
-    manifest: Dict[str, Dict[str, Dict]] = {}
+    folds_list = []
     for i, (train, test) in enumerate(folds, start=1):
-        fold_key = f"fold_{i}"
-        manifest[fold_key] = {"train": {}, "test": {}}
+        fold_data = {"train": {}, "test": {}}
         for patient in train:
-            manifest[fold_key]["train"][patient] = make_patient_entry(cfg, patient)
+            fold_data["train"][patient] = make_patient_entry(cfg, patient)
         for patient in test:
-            manifest[fold_key]["test"][patient] = make_patient_entry(cfg, patient)
+            fold_data["test"][patient] = make_patient_entry(cfg, patient)
+        folds_list.append(fold_data)
         logging.info("Fold %d | train=%d test=%d", i, len(train), len(test))
-    return manifest
+    return {"folds": folds_list}
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build K-fold JSON manifest for SR MoE.")

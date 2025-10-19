@@ -9,10 +9,12 @@ import numpy as np
 import nibabel as nib
 from joblib import Parallel, delayed
 from scipy.optimize import minimize
+from tqdm import tqdm
 
 from pacs_sr.config.config import PacsSRConfig
 from pacs_sr.utils.patches import region_labels, region_adjacency_from_labels
 from pacs_sr.utils.zscore import zscore, inverse_zscore, ZScoreParams
+from pacs_sr.utils.registration import register_and_mask, apply_brain_mask
 from pacs_sr.model.metrics import psnr, ssim3d_slicewise, mae, mse
 from pacs_sr.model.regularization import laplacian_smooth_weights
 from pacs_sr.utils.logger import PacsSRLogger, setup_experiment_logger
@@ -65,21 +67,34 @@ def _accumulate_region_stats_for_patient(
     hr_img = _load_nii(hr_path)
     hr = _get_data32(hr_img)
 
-    # Foreground mask from HR > 0
+    # Preprocessing: register to atlas and apply brain mask (before normalization)
+    if cfg.use_registration and cfg.atlas_dir is not None:
+        hr, _ = register_and_mask(hr, hr_img.affine, pulse, cfg.atlas_dir)
+
+    # Foreground mask from HR > 0 (after registration if enabled)
     mask = hr > 0
 
     # z-score normalization under mask
     if cfg.normalize == "zscore":
         hr, _ = zscore(hr, mask=mask)
+
     # weights for edge emphasis
     wv = _compute_edge_weights(hr, cfg.lambda_edge, cfg.edge_power) * mask.astype(np.float32)
 
-    # load expert predictions
+    # load expert predictions and apply same preprocessing
     X = []
     for p in sr_paths:
-        xi = _get_data32(_load_nii(p))
+        xi_img = _load_nii(p)
+        xi = _get_data32(xi_img)
+
+        # Preprocessing: register expert predictions (before normalization)
+        if cfg.use_registration and cfg.atlas_dir is not None:
+            xi, _ = register_and_mask(xi, xi_img.affine, pulse, cfg.atlas_dir)
+
+        # z-score normalization with same mask as HR
         if cfg.normalize == "zscore":
             xi, _ = zscore(xi, mask=mask)
+
         X.append(xi.astype(np.float32))
     X = np.stack(X, axis=0)  # (M, Z, Y, X)
     M = X.shape[0]
@@ -171,6 +186,7 @@ class PatchwiseConvexStacker:
         self.weights_: Dict[Tuple[str, str], Dict[int, np.ndarray]] = {}  # key=(spacing,pulse) -> {rid: w}
         self.labels_cache_: Dict[Tuple[int,int,int,int,int], np.ndarray] = {}
         self.region_ids_cache_: Dict[Tuple[int,int,int,int,int], List[int]] = {}
+        self.mask_cache_: Dict[str, np.ndarray] = {}  # cache for brain masks
 
         # Initialize logger
         if logger is None:
@@ -204,9 +220,19 @@ class PatchwiseConvexStacker:
         entries = list(manifest["train"].values())
         n_patients = len(entries)
 
-        # peek one HR to build labels
-        _, hrp = next(iter((_patient_paths(e, self.cfg.models, spacing, pulse) for e in entries)))
-        shape = _load_nii(hrp).shape[:3]
+        # Determine volume shape for labels
+        if self.cfg.use_registration and self.cfg.atlas_dir is not None:
+            # If using registration, get shape from atlas
+            from pacs_sr.utils.registration import get_atlas_path
+            import ants
+            atlas_path = get_atlas_path(self.cfg.atlas_dir, pulse)
+            atlas_img = ants.image_read(str(atlas_path))
+            shape = atlas_img.numpy().shape
+        else:
+            # Otherwise, peek one HR to build labels
+            _, hrp = next(iter((_patient_paths(e, self.cfg.models, spacing, pulse) for e in entries)))
+            shape = _load_nii(hrp).shape[:3]
+
         labels, rids = self._labels_for_shape(shape)
         n_regions = len(rids)
         M = len(self.cfg.models)
@@ -214,16 +240,11 @@ class PatchwiseConvexStacker:
         # Log training start
         self.logger.log_training_start(spacing, pulse, n_patients, n_regions)
 
-        # Log patient processing progress
+        # Accumulate per-patient stats in parallel with progress bar
         self.logger.info("Accumulating statistics from training patients...")
-        for idx, entry in enumerate(entries):
-            patient_id = list(manifest["train"].keys())[idx]
-            self.logger.log_patient_progress(patient_id, idx, n_patients)
-
-        # accumulate per-patient stats in parallel, then reduce
         stats_list = Parallel(n_jobs=self.cfg.num_workers, prefer="threads")(
             delayed(_accumulate_region_stats_for_patient)(e, self.cfg.models, spacing, pulse, labels, self.cfg)
-            for e in entries
+            for e in tqdm(entries, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
         )
         region_ids, Qs, Bs, counts = _reduce_region_stats(stats_list, M)
 
@@ -264,6 +285,13 @@ class PatchwiseConvexStacker:
         sr_paths, hr_path = _patient_paths(entry, self.cfg.models, spacing, pulse)
         hr_img = _load_nii(hr_path)
         hr = _get_data32(hr_img)
+
+        # Preprocessing: register HR to atlas if enabled (before normalization)
+        hr_affine = hr_img.affine
+        if self.cfg.use_registration and self.cfg.atlas_dir is not None:
+            hr, hr_affine = register_and_mask(hr, hr_img.affine, pulse, self.cfg.atlas_dir)
+
+        # Determine labels shape (atlas shape if registration enabled)
         labels, rids = self._labels_for_shape(hr.shape[:3])
         wdict = self.weights_[(spacing, pulse)]
 
@@ -274,15 +302,23 @@ class PatchwiseConvexStacker:
         else:
             hr_n, hr_z = hr, ZScoreParams(mean=0.0, std=1.0)
 
-        # load experts normalized if requested
+        # load experts and apply same preprocessing
         X = []
         for p in sr_paths:
-            xi = _get_data32(_load_nii(p))
+            xi_img = _load_nii(p)
+            xi = _get_data32(xi_img)
+
+            # Preprocessing: register expert predictions
+            if self.cfg.use_registration and self.cfg.atlas_dir is not None:
+                xi, _ = register_and_mask(xi, xi_img.affine, pulse, self.cfg.atlas_dir)
+
+            # Normalize with same mask as HR
             if self.cfg.normalize == "zscore":
                 xi, _ = zscore(xi, mask=mask)
             X.append(xi.astype(np.float32))
         X = np.stack(X, axis=0)  # (M, Z, Y, X)
 
+        # Perform blending (cross product of weights and expert opinions)
         blended_n = np.zeros_like(hr_n, dtype=np.float32)
         for rid in rids:
             sel = labels == rid
@@ -292,50 +328,71 @@ class PatchwiseConvexStacker:
             # linear blend inside tile
             tile = np.tensordot(w.astype(np.float32), X[:, sel], axes=(0,0))
             blended_n[sel] = tile.astype(np.float32)
-        # invert normalization to native scale
+
+        # Postprocessing: registration already applied during preprocessing
+        # No need to register again since all volumes are already in atlas space
+
+        # Step 1: invert normalization to native scale
         blended_native = inverse_zscore(blended_n, hr_z) if self.cfg.normalize == "zscore" else blended_n
-        return blended_native, hr_img, hr, hr_z
+
+        # Step 2: apply brain mask to set out-of-brain voxels to 0 (fixes tiling artifacts)
+        if self.cfg.use_registration and self.cfg.atlas_dir is not None:
+            blended_native = apply_brain_mask(blended_native, pulse, self.cfg.atlas_dir, self.mask_cache_)
+
+        # Create reference image with potentially updated affine
+        ref_img = nib.Nifti1Image(blended_native, hr_affine, hr_img.header)
+
+        return blended_native, ref_img, hr, hr_z
 
     def evaluate_split(self, manifest: Dict, spacing: str, pulse: str) -> Dict[str, float]:
         """
         Evaluate on train and test sets. Write outputs if requested.
         """
-        out_dir = Path(self.cfg.out_root) / f"{self.cfg.experiment_name}" / spacing / pulse
+        # Base directory for this spacing
+        base_dir = Path(self.cfg.out_root) / f"{self.cfg.experiment_name}" / spacing
+        # Directory for metrics and weights (per pulse)
+        out_dir = base_dir / pulse
         out_dir.mkdir(parents=True, exist_ok=True)
+        # Directory for output volumes (shared across pulses)
+        output_volumes_dir = base_dir / "output_volumes"
+        output_volumes_dir.mkdir(parents=True, exist_ok=True)
         results = {}
 
         # Get weight dictionary and volume shape for NPZ saving
         wdict = self.weights_[(spacing, pulse)]
 
-        # Train set evaluation
-        train_entries = list(manifest["train"].items())
-        n_train = len(train_entries)
-        self.logger.log_evaluation_start(spacing, pulse, "train", n_train)
+        # Train set evaluation (optional, can be disabled for speed)
+        if self.cfg.evaluate_train:
+            train_entries = list(manifest["train"].items())
+            n_train = len(train_entries)
+            self.logger.log_evaluation_start(spacing, pulse, "train", n_train)
 
-        train_metrics = []
-        for idx, (pid, entry) in enumerate(train_entries):
-            pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
-            mask = hr > 0
-            metrics = {
-                "mse": mse(pred, hr, mask),
-                "mae": mae(pred, hr, mask),
-                "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
-                "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
-            }
-            train_metrics.append(metrics)
+            train_metrics = []
+            for idx, (pid, entry) in enumerate(tqdm(train_entries, desc=f"Evaluating train ({spacing}, {pulse})", unit="patient", disable=False)):
+                pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
+                mask = hr > 0
+                metrics = {
+                    "mse": mse(pred, hr, mask),
+                    "mae": mae(pred, hr, mask),
+                    "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
+                    "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
+                }
+                train_metrics.append(metrics)
 
-            # Log per-patient metrics
-            self.logger.log_patient_metrics(pid, metrics, idx, n_train)
+                # Log per-patient metrics (less verbose)
+                if idx % 10 == 0 or idx == n_train - 1:
+                    self.logger.log_patient_metrics(pid, metrics, idx, n_train)
 
-            # Save blended prediction
-            if self.cfg.save_blends:
-                blend_path = out_dir / f"{pid}_blend_train.nii.gz"
-                nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
-                self.logger.log_blend_saving(blend_path, pid)
+                # Save blended prediction
+                if self.cfg.save_blends:
+                    blend_path = out_dir / f"{pid}_blend_train.nii.gz"
+                    nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
 
-        # Aggregate train metrics
-        results["train"] = {k: float(np.mean([m[k] for m in train_metrics])) for k in train_metrics[0].keys()}
-        self.logger.log_aggregate_metrics("train", results["train"], spacing, pulse)
+            # Aggregate train metrics
+            results["train"] = {k: float(np.mean([m[k] for m in train_metrics])) for k in train_metrics[0].keys()}
+            self.logger.log_aggregate_metrics("train", results["train"], spacing, pulse)
+        else:
+            self.logger.info(f"Skipping train evaluation (evaluate_train=False)")
 
         # Test set evaluation
         test_entries = list(manifest["test"].items())
@@ -345,7 +402,7 @@ class PatchwiseConvexStacker:
         test_metrics = []
         volume_shape = None  # Will be set from first test patient
 
-        for idx, (pid, entry) in enumerate(test_entries):
+        for idx, (pid, entry) in enumerate(tqdm(test_entries, desc=f"Evaluating test ({spacing}, {pulse})", unit="patient", disable=False)):
             pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
             mask = hr > 0
 
@@ -361,12 +418,13 @@ class PatchwiseConvexStacker:
             }
             test_metrics.append(metrics)
 
-            # Log per-patient metrics
-            self.logger.log_patient_metrics(pid, metrics, idx, n_test)
+            # Log per-patient metrics (every 5 patients or last)
+            if idx % 5 == 0 or idx == n_test - 1:
+                self.logger.log_patient_metrics(pid, metrics, idx, n_test)
 
-            # Save blended prediction
+            # Save blended prediction to output_volumes directory
             if self.cfg.save_blends:
-                blend_path = out_dir / f"{pid}_blend_test.nii.gz"
+                blend_path = output_volumes_dir / f"{pid}-{pulse}.nii.gz"
                 nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
                 self.logger.log_blend_saving(blend_path, pid)
 
