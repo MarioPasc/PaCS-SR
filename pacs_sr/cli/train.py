@@ -122,14 +122,8 @@ def main():
         print(f"Test patients:  {len(fold_data['test'])}")
 
         # Create model for this fold
-        # Modify output root to include fold number
-        from dataclasses import replace
-        fold_config = replace(
-            pacs_sr_config,
-            out_root=pacs_sr_config.out_root / f"fold_{fold_num}"
-        )
-
-        model = PatchwiseConvexStacker(fold_config)
+        # Pass fold_num to model for proper directory structure
+        model = PatchwiseConvexStacker(pacs_sr_config, fold_num=fold_num)
 
         # Train for each spacing and pulse
         for spacing in spacings_to_train:

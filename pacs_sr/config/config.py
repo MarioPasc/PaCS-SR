@@ -76,9 +76,21 @@ class PacsSRConfig:
 
 
 @dataclass(frozen=True)
+class RegistrationConfig:
+    """Configuration for atlas-based registration."""
+    atlas: Path
+    t1: str
+    t2: str
+    epi: str
+    pd: str
+    brain_mask: str
+
+
+@dataclass(frozen=True)
 class FullConfig:
     """Complete configuration containing all sections."""
     data: DataConfig
+    registration: RegistrationConfig
     pacs_sr: PacsSRConfig
     predict: Optional[PredictConfig] = None
 
@@ -97,13 +109,30 @@ def load_data_config(config_dict: dict) -> DataConfig:
     )
 
 
-def load_pacs_sr_config(config_dict: dict, data_config: Optional[DataConfig] = None) -> PacsSRConfig:
+def load_registration_config(config_dict: dict) -> RegistrationConfig:
+    """Parse the registration section of the config."""
+    return RegistrationConfig(
+        atlas=Path(config_dict["atlas"]),
+        t1=str(config_dict["t1"]),
+        t2=str(config_dict["t2"]),
+        epi=str(config_dict["epi"]),
+        pd=str(config_dict["pd"]),
+        brain_mask=str(config_dict["brain_mask"])
+    )
+
+
+def load_pacs_sr_config(
+    config_dict: dict,
+    data_config: Optional[DataConfig] = None,
+    registration_config: Optional[RegistrationConfig] = None
+) -> PacsSRConfig:
     """
     Parse the pacs_sr section of the config.
 
     Args:
         config_dict: The pacs_sr section from YAML
         data_config: Optional DataConfig to populate models/spacings/pulses fields
+        registration_config: Optional RegistrationConfig to get atlas_dir
 
     Returns:
         PacsSRConfig with all fields populated
@@ -119,6 +148,15 @@ def load_pacs_sr_config(config_dict: dict, data_config: Optional[DataConfig] = N
         spacings = tuple(config_dict.get("spacings", []))
         pulses = tuple(config_dict.get("pulses", []))
 
+    # Get atlas_dir from registration_config if use_registration is enabled
+    atlas_dir = None
+    if config_dict.get("use_registration", False):
+        if registration_config is not None:
+            atlas_dir = registration_config.atlas
+        elif "atlas_dir" in config_dict and config_dict["atlas_dir"]:
+            # Fallback to old config format for backward compatibility
+            atlas_dir = Path(config_dict["atlas_dir"])
+
     return PacsSRConfig(
         experiment_name=config_dict["experiment_name"],
         patch_size=int(config_dict["patch_size"]),
@@ -130,7 +168,7 @@ def load_pacs_sr_config(config_dict: dict, data_config: Optional[DataConfig] = N
         edge_power=float(config_dict["edge_power"]),
         normalize=str(config_dict["normalize"]),
         use_registration=bool(config_dict.get("use_registration", False)),
-        atlas_dir=Path(config_dict["atlas_dir"]) if "atlas_dir" in config_dict and config_dict["atlas_dir"] else None,
+        atlas_dir=atlas_dir,
         num_workers=int(config_dict["num_workers"]),
         device=str(config_dict["device"]),
         compute_lpips=bool(config_dict["compute_lpips"]),
@@ -172,14 +210,19 @@ def load_full_config(path: Path) -> FullConfig:
         path: Path to YAML configuration file
 
     Returns:
-        FullConfig object with data, pacs_sr, and optional predict sections
+        FullConfig object with data, registration, pacs_sr, and optional predict sections
     """
     with open(path, "r") as f:
         yaml_data = yaml.safe_load(f)
 
     data_config = load_data_config(yaml_data["data"])
-    # Pass data_config to populate models/spacings/pulses in pacs_sr_config
-    pacs_sr_config = load_pacs_sr_config(yaml_data["pacs_sr"], data_config=data_config)
+    registration_config = load_registration_config(yaml_data["registration"])
+    # Pass data_config and registration_config to populate all fields in pacs_sr_config
+    pacs_sr_config = load_pacs_sr_config(
+        yaml_data["pacs_sr"],
+        data_config=data_config,
+        registration_config=registration_config
+    )
 
     predict_config = None
     if "predict" in yaml_data:
@@ -187,6 +230,7 @@ def load_full_config(path: Path) -> FullConfig:
 
     return FullConfig(
         data=data_config,
+        registration=registration_config,
         pacs_sr=pacs_sr_config,
         predict=predict_config
     )

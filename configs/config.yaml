@@ -34,8 +34,7 @@ pacs_sr:
   # Normalization
   normalize: "zscore"   # ['zscore'] for now
   # Registration
-  use_registration: false  # enable atlas-based registration and brain masking
-  atlas_dir: /media/mpascual/PortableSSD/Meningiomas/ATLAS/sri24_spm8/templates
+  use_registration: true  # enable atlas-based registration and brain masking
   # I/O and compute
   num_workers: 6        # parallel workers for per-patient evaluation
   device: "cpu"         # reserved for future GPU-assisted ops

@@ -181,8 +181,9 @@ class PatchwiseConvexStacker:
     Patchwise convex stacker for 3D MRI SR.
     Learn one weight vector per 3D tile. Blending is linear and interpretable.
     """
-    def __init__(self, cfg: PacsSRConfig, logger: Optional[PacsSRLogger] = None) -> None:
+    def __init__(self, cfg: PacsSRConfig, fold_num: Optional[int] = None, logger: Optional[PacsSRLogger] = None) -> None:
         self.cfg = cfg
+        self.fold_num = fold_num  # Store fold number for directory structure
         self.weights_: Dict[Tuple[str, str], Dict[int, np.ndarray]] = {}  # key=(spacing,pulse) -> {rid: w}
         self.labels_cache_: Dict[Tuple[int,int,int,int,int], np.ndarray] = {}
         self.region_ids_cache_: Dict[Tuple[int,int,int,int,int], List[int]] = {}
@@ -347,15 +348,33 @@ class PatchwiseConvexStacker:
     def evaluate_split(self, manifest: Dict, spacing: str, pulse: str) -> Dict[str, float]:
         """
         Evaluate on train and test sets. Write outputs if requested.
+
+        Directory structure:
+        {out_root}/{experiment_name}/{spacing}/
+            ├── output_volumes/
+            │   └── {patient_id}-{pulse}.nii.gz  (validation fold outputs)
+            └── model_data/
+                └── fold_{N}/
+                    └── {pulse}/
+                        ├── metrics.json
+                        ├── weights.json
+                        └── {patient_id}_weights_test.npz
         """
-        # Base directory for this spacing
-        base_dir = Path(self.cfg.out_root) / f"{self.cfg.experiment_name}" / spacing
-        # Directory for metrics and weights (per pulse)
-        out_dir = base_dir / pulse
-        out_dir.mkdir(parents=True, exist_ok=True)
-        # Directory for output volumes (shared across pulses)
+        # Base directory: {out_root}/{experiment_name}/{spacing}
+        base_dir = Path(self.cfg.out_root) / self.cfg.experiment_name / spacing
+
+        # Directory for output volumes (shared across folds and pulses)
         output_volumes_dir = base_dir / "output_volumes"
         output_volumes_dir.mkdir(parents=True, exist_ok=True)
+
+        # Directory for model data (per fold and per pulse)
+        if self.fold_num is not None:
+            model_data_dir = base_dir / "model_data" / f"fold_{self.fold_num}" / pulse
+        else:
+            # Fallback if fold_num not set (backward compatibility)
+            model_data_dir = base_dir / "model_data" / pulse
+        model_data_dir.mkdir(parents=True, exist_ok=True)
+
         results = {}
 
         # Get weight dictionary and volume shape for NPZ saving
@@ -383,9 +402,9 @@ class PatchwiseConvexStacker:
                 if idx % 10 == 0 or idx == n_train - 1:
                     self.logger.log_patient_metrics(pid, metrics, idx, n_train)
 
-                # Save blended prediction
+                # Save blended prediction (train blends go to model_data directory)
                 if self.cfg.save_blends:
-                    blend_path = out_dir / f"{pid}_blend_train.nii.gz"
+                    blend_path = model_data_dir / f"{pid}_blend_train.nii.gz"
                     nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
 
             # Aggregate train metrics
@@ -430,7 +449,7 @@ class PatchwiseConvexStacker:
 
             # Save weight maps in NPZ format for test patients
             if self.cfg.save_weight_volumes and volume_shape is not None:
-                weight_npz_path = out_dir / f"{pid}_weights_test.npz"
+                weight_npz_path = model_data_dir / f"{pid}_weights_test.npz"
                 weights_dict_to_npz(
                     weights_dict=wdict,
                     volume_shape=volume_shape,
@@ -451,13 +470,13 @@ class PatchwiseConvexStacker:
         self.logger.log_aggregate_metrics("test", results["test"], spacing, pulse)
 
         # Save weights dictionary as JSON (for compatibility)
-        weights_json_path = out_dir / "weights.json"
+        weights_json_path = model_data_dir / "weights.json"
         with open(weights_json_path, "w") as f:
             json.dump({str(r): w.tolist() for r, w in wdict.items()}, f, indent=2)
         self.logger.info(f"\nSaved weight dictionary (JSON): {weights_json_path}")
 
         # Save metrics summary
-        metrics_path = out_dir / "metrics.json"
+        metrics_path = model_data_dir / "metrics.json"
         with open(metrics_path, "w") as f:
             json.dump(results, f, indent=2)
         self.logger.info(f"Saved metrics summary: {metrics_path}")
