@@ -34,7 +34,11 @@ def _load_nii(path: Path) -> nib.Nifti1Image:
     return nib.load(str(path))
 
 def _get_data32(img: nib.Nifti1Image) -> Array:
-    return img.get_fdata(dtype=np.float32)
+    """Load image data as float32. Raises EOFError if compressed file is corrupted."""
+    try:
+        return img.get_fdata(dtype=np.float32)
+    except EOFError as e:
+        raise EOFError(f"Corrupted compressed file: {e}") from e
 
 def _patient_paths(entry: Dict, models: Tuple[str, ...], spacing: str, pulse: str) -> Tuple[List[Path], Path]:
     sr_paths = [Path(entry[m][spacing][pulse]) for m in models]
@@ -108,6 +112,23 @@ def _compute_edge_weights(hr: Array, lam_edge: float, edge_power: float) -> Arra
     gmax = float(np.max(g)) + 1e-6
     w = 1.0 + lam_edge * (g / gmax) ** edge_power
     return w.astype(np.float32)
+
+def _accumulate_region_stats_for_patient_safe(
+    entry: Dict,
+    models: Tuple[str, ...],
+    spacing: str,
+    pulse: str,
+    labels: Array,
+    cfg: PacsSRConfig,
+) -> Optional[Dict[int, RegionStats]]:
+    """
+    Wrapper that safely handles corrupted files by returning None instead of crashing.
+    """
+    try:
+        return _accumulate_region_stats_for_patient(entry, models, spacing, pulse, labels, cfg)
+    except EOFError:
+        # Return None for corrupted patients
+        return None
 
 def _accumulate_region_stats_for_patient(
     entry: Dict,
@@ -343,10 +364,18 @@ class PatchwiseConvexStacker:
             import time
             patient_start_time = time.time()
             stats_list = []
+            skipped_patients = []
             for idx, e in enumerate(entries):
                 patient_iter_start = time.time()
-                result = _accumulate_region_stats_for_patient(e, self.cfg.models, spacing, pulse, labels, self.cfg)
-                stats_list.append(result)
+                try:
+                    result = _accumulate_region_stats_for_patient(e, self.cfg.models, spacing, pulse, labels, self.cfg)
+                    stats_list.append(result)
+                except EOFError as err:
+                    # Skip corrupted patient files
+                    patient_id = e.get("patient_id", f"patient_{idx}")
+                    skipped_patients.append(patient_id)
+                    self.logger.warning(f"  Skipping patient {patient_id}: Corrupted file detected - {err}")
+                    continue
                 patient_iter_time = time.time() - patient_iter_start
 
                 # Log every 5 patients or at the end
@@ -359,12 +388,20 @@ class PatchwiseConvexStacker:
                         f"Last: {patient_iter_time:.1f}s | Avg: {avg_time:.1f}s/patient | "
                         f"ETA: {eta/60:.1f}min"
                     )
+
+            if skipped_patients:
+                self.logger.warning(f"Skipped {len(skipped_patients)} corrupted patient(s): {', '.join(skipped_patients)}")
         else:
-            # Use tqdm progress bar
-            stats_list = Parallel(n_jobs=self.cfg.num_workers, prefer="threads")(
-                delayed(_accumulate_region_stats_for_patient)(e, self.cfg.models, spacing, pulse, labels, self.cfg)
+            # Use tqdm progress bar (with safe wrapper to handle corrupted files)
+            stats_list_raw = Parallel(n_jobs=self.cfg.num_workers, prefer="threads")(
+                delayed(_accumulate_region_stats_for_patient_safe)(e, self.cfg.models, spacing, pulse, labels, self.cfg)
                 for e in tqdm(entries, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
             )
+            # Filter out None results (corrupted patients)
+            stats_list = [s for s in stats_list_raw if s is not None]
+            n_skipped = len(stats_list_raw) - len(stats_list)
+            if n_skipped > 0:
+                self.logger.warning(f"Skipped {n_skipped} corrupted patient(s) during parallel processing")
 
         region_ids, Qs, Bs, counts = _reduce_region_stats(stats_list, M)
 
@@ -542,48 +579,56 @@ class PatchwiseConvexStacker:
                 eval_start_time = time.time()
                 for idx, (pid, entry) in enumerate(train_entries):
                     patient_start = time.time()
-                    pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
-                    mask = hr > 0
-                    metrics = {
-                        "mse": mse(pred, hr, mask),
-                        "mae": mae(pred, hr, mask),
-                        "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
-                        "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
-                    }
-                    train_metrics.append(metrics)
-                    patient_time = time.time() - patient_start
+                    try:
+                        pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
+                        mask = hr > 0
+                        metrics = {
+                            "mse": mse(pred, hr, mask),
+                            "mae": mae(pred, hr, mask),
+                            "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
+                            "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
+                        }
+                        train_metrics.append(metrics)
+                        patient_time = time.time() - patient_start
 
-                    # Log every 10 patients or at the end
-                    if idx % 10 == 0 or idx == n_train - 1:
-                        elapsed = time.time() - eval_start_time
-                        avg_time = elapsed / (idx + 1)
-                        self.logger.log_patient_metrics(pid, metrics, idx, n_train, elapsed_time=patient_time)
+                        # Log every 10 patients or at the end
+                        if idx % 10 == 0 or idx == n_train - 1:
+                            elapsed = time.time() - eval_start_time
+                            avg_time = elapsed / (idx + 1)
+                            self.logger.log_patient_metrics(pid, metrics, idx, n_train, elapsed_time=patient_time)
 
-                    # Save blended prediction (train blends go to model_data directory)
-                    if self.cfg.save_blends:
-                        blend_path = model_data_dir / f"{pid}_blend_train.nii.gz"
-                        nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+                        # Save blended prediction (train blends go to model_data directory)
+                        if self.cfg.save_blends:
+                            blend_path = model_data_dir / f"{pid}_blend_train.nii.gz"
+                            nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+                    except EOFError as err:
+                        self.logger.warning(f"  Skipping train patient {pid}: Corrupted file - {err}")
+                        continue
             else:
                 # Use tqdm progress bar
                 for idx, (pid, entry) in enumerate(tqdm(train_entries, desc=f"Evaluating train ({spacing}, {pulse})", unit="patient", disable=False)):
-                    pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
-                    mask = hr > 0
-                    metrics = {
-                        "mse": mse(pred, hr, mask),
-                        "mae": mae(pred, hr, mask),
-                        "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
-                        "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
-                    }
-                    train_metrics.append(metrics)
+                    try:
+                        pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
+                        mask = hr > 0
+                        metrics = {
+                            "mse": mse(pred, hr, mask),
+                            "mae": mae(pred, hr, mask),
+                            "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
+                            "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
+                        }
+                        train_metrics.append(metrics)
 
-                    # Log per-patient metrics (less verbose)
-                    if idx % 10 == 0 or idx == n_train - 1:
-                        self.logger.log_patient_metrics(pid, metrics, idx, n_train)
+                        # Log per-patient metrics (less verbose)
+                        if idx % 10 == 0 or idx == n_train - 1:
+                            self.logger.log_patient_metrics(pid, metrics, idx, n_train)
 
-                    # Save blended prediction (train blends go to model_data directory)
-                    if self.cfg.save_blends:
-                        blend_path = model_data_dir / f"{pid}_blend_train.nii.gz"
-                        nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+                        # Save blended prediction (train blends go to model_data directory)
+                        if self.cfg.save_blends:
+                            blend_path = model_data_dir / f"{pid}_blend_train.nii.gz"
+                            nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+                    except EOFError as err:
+                        self.logger.warning(f"  Skipping train patient {pid}: Corrupted file - {err}")
+                        continue
 
             # Aggregate train metrics
             if train_metrics:
@@ -609,101 +654,109 @@ class PatchwiseConvexStacker:
             eval_start_time = time.time()
             for idx, (pid, entry) in enumerate(test_entries):
                 patient_start = time.time()
-                pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
-                mask = hr > 0
+                try:
+                    pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
+                    mask = hr > 0
 
-                # Capture volume shape for weight map saving
-                if volume_shape is None:
-                    volume_shape = hr.shape[:3]
+                    # Capture volume shape for weight map saving
+                    if volume_shape is None:
+                        volume_shape = hr.shape[:3]
 
-                metrics = {
-                    "mse": mse(pred, hr, mask),
-                    "mae": mae(pred, hr, mask),
-                    "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
-                    "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
-                }
-                test_metrics.append(metrics)
-                patient_time = time.time() - patient_start
+                    metrics = {
+                        "mse": mse(pred, hr, mask),
+                        "mae": mae(pred, hr, mask),
+                        "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
+                        "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
+                    }
+                    test_metrics.append(metrics)
+                    patient_time = time.time() - patient_start
 
-                # Log every 5 patients or at the end
-                if idx % 5 == 0 or idx == n_test - 1:
-                    elapsed = time.time() - eval_start_time
-                    avg_time = elapsed / (idx + 1)
-                    eta = avg_time * (n_test - idx - 1)
-                    self.logger.info(
-                        f"  [{idx+1:3d}/{n_test:3d}] ({(idx+1)/n_test*100:5.1f}%) {pid}: "
-                        f"PSNR={metrics['psnr']:.4f} SSIM={metrics['ssim']:.4f} | "
-                        f"Time: {patient_time:.1f}s | Avg: {avg_time:.1f}s | ETA: {eta/60:.1f}min"
-                    )
+                    # Log every 5 patients or at the end
+                    if idx % 5 == 0 or idx == n_test - 1:
+                        elapsed = time.time() - eval_start_time
+                        avg_time = elapsed / (idx + 1)
+                        eta = avg_time * (n_test - idx - 1)
+                        self.logger.info(
+                            f"  [{idx+1:3d}/{n_test:3d}] ({(idx+1)/n_test*100:5.1f}%) {pid}: "
+                            f"PSNR={metrics['psnr']:.4f} SSIM={metrics['ssim']:.4f} | "
+                            f"Time: {patient_time:.1f}s | Avg: {avg_time:.1f}s | ETA: {eta/60:.1f}min"
+                        )
 
-                # Save blended prediction to output_volumes directory
-                if self.cfg.save_blends:
-                    blend_path = output_volumes_dir / f"{pid}-{pulse}.nii.gz"
-                    nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
-                    self.logger.log_blend_saving(blend_path, pid)
+                    # Save blended prediction to output_volumes directory
+                    if self.cfg.save_blends:
+                        blend_path = output_volumes_dir / f"{pid}-{pulse}.nii.gz"
+                        nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+                        self.logger.log_blend_saving(blend_path, pid)
 
-                # Save weight maps in NPZ format for test patients
-                if self.cfg.save_weight_volumes and volume_shape is not None:
-                    weight_npz_path = model_data_dir / f"{pid}_weights_test.npz"
-                    weights_dict_to_npz(
-                        weights_dict=wdict,
-                        volume_shape=volume_shape,
-                        patch_size=self.cfg.patch_size,
-                        stride=self.cfg.stride,
-                        model_names=list(self.cfg.models),
-                        save_path=weight_npz_path,
-                        patient_id=pid,
-                        split="test",
-                        spacing=spacing,
-                        pulse=pulse,
-                        include_analysis=True
-                    )
-                    self.logger.log_weight_saving(weight_npz_path, format="npz")
+                    # Save weight maps in NPZ format for test patients
+                    if self.cfg.save_weight_volumes and volume_shape is not None:
+                        weight_npz_path = model_data_dir / f"{pid}_weights_test.npz"
+                        weights_dict_to_npz(
+                            weights_dict=wdict,
+                            volume_shape=volume_shape,
+                            patch_size=self.cfg.patch_size,
+                            stride=self.cfg.stride,
+                            model_names=list(self.cfg.models),
+                            save_path=weight_npz_path,
+                            patient_id=pid,
+                            split="test",
+                            spacing=spacing,
+                            pulse=pulse,
+                            include_analysis=True
+                        )
+                        self.logger.log_weight_saving(weight_npz_path, format="npz")
+                except EOFError as err:
+                    self.logger.warning(f"  Skipping test patient {pid}: Corrupted file - {err}")
+                    continue
         else:
             # Use tqdm progress bar
             for idx, (pid, entry) in enumerate(tqdm(test_entries, desc=f"Evaluating test ({spacing}, {pulse})", unit="patient", disable=False)):
-                pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
-                mask = hr > 0
+                try:
+                    pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
+                    mask = hr > 0
 
-                # Capture volume shape for weight map saving
-                if volume_shape is None:
-                    volume_shape = hr.shape[:3]
+                    # Capture volume shape for weight map saving
+                    if volume_shape is None:
+                        volume_shape = hr.shape[:3]
 
-                metrics = {
-                    "mse": mse(pred, hr, mask),
-                    "mae": mae(pred, hr, mask),
-                    "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
-                    "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
-                }
-                test_metrics.append(metrics)
+                    metrics = {
+                        "mse": mse(pred, hr, mask),
+                        "mae": mae(pred, hr, mask),
+                        "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
+                        "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
+                    }
+                    test_metrics.append(metrics)
 
-                # Log per-patient metrics (every 5 patients or last)
-                if idx % 5 == 0 or idx == n_test - 1:
-                    self.logger.log_patient_metrics(pid, metrics, idx, n_test)
+                    # Log per-patient metrics (every 5 patients or last)
+                    if idx % 5 == 0 or idx == n_test - 1:
+                        self.logger.log_patient_metrics(pid, metrics, idx, n_test)
 
-                # Save blended prediction to output_volumes directory
-                if self.cfg.save_blends:
-                    blend_path = output_volumes_dir / f"{pid}-{pulse}.nii.gz"
-                    nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
-                    self.logger.log_blend_saving(blend_path, pid)
+                    # Save blended prediction to output_volumes directory
+                    if self.cfg.save_blends:
+                        blend_path = output_volumes_dir / f"{pid}-{pulse}.nii.gz"
+                        nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+                        self.logger.log_blend_saving(blend_path, pid)
 
-                # Save weight maps in NPZ format for test patients
-                if self.cfg.save_weight_volumes and volume_shape is not None:
-                    weight_npz_path = model_data_dir / f"{pid}_weights_test.npz"
-                    weights_dict_to_npz(
-                        weights_dict=wdict,
-                        volume_shape=volume_shape,
-                        patch_size=self.cfg.patch_size,
-                        stride=self.cfg.stride,
-                        model_names=list(self.cfg.models),
-                        save_path=weight_npz_path,
-                        patient_id=pid,
-                        split="test",
-                        spacing=spacing,
-                        pulse=pulse,
-                        include_analysis=True
-                    )
-                    self.logger.log_weight_saving(weight_npz_path, format="npz")
+                    # Save weight maps in NPZ format for test patients
+                    if self.cfg.save_weight_volumes and volume_shape is not None:
+                        weight_npz_path = model_data_dir / f"{pid}_weights_test.npz"
+                        weights_dict_to_npz(
+                            weights_dict=wdict,
+                            volume_shape=volume_shape,
+                            patch_size=self.cfg.patch_size,
+                            stride=self.cfg.stride,
+                            model_names=list(self.cfg.models),
+                            save_path=weight_npz_path,
+                            patient_id=pid,
+                            split="test",
+                            spacing=spacing,
+                            pulse=pulse,
+                            include_analysis=True
+                        )
+                        self.logger.log_weight_saving(weight_npz_path, format="npz")
+                except EOFError as err:
+                    self.logger.warning(f"  Skipping test patient {pid}: Corrupted file - {err}")
+                    continue
 
         # Aggregate test metrics
         if test_metrics:
