@@ -334,12 +334,38 @@ class PatchwiseConvexStacker:
         # Log training start
         self.logger.log_training_start(spacing, pulse, n_patients, n_regions)
 
-        # Accumulate per-patient stats in parallel with progress bar
+        # Accumulate per-patient stats in parallel
         self.logger.info("Accumulating statistics from training patients...")
-        stats_list = Parallel(n_jobs=self.cfg.num_workers, prefer="threads")(
-            delayed(_accumulate_region_stats_for_patient)(e, self.cfg.models, spacing, pulse, labels, self.cfg)
-            for e in tqdm(entries, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
-        )
+
+        # Use tqdm only if not disabled
+        if self.cfg.disable_tqdm:
+            # SLURM-friendly logging: manual progress tracking
+            import time
+            patient_start_time = time.time()
+            stats_list = []
+            for idx, e in enumerate(entries):
+                patient_iter_start = time.time()
+                result = _accumulate_region_stats_for_patient(e, self.cfg.models, spacing, pulse, labels, self.cfg)
+                stats_list.append(result)
+                patient_iter_time = time.time() - patient_iter_start
+
+                # Log every 5 patients or at the end
+                if (idx + 1) % 5 == 0 or idx == n_patients - 1:
+                    elapsed = time.time() - patient_start_time
+                    avg_time = elapsed / (idx + 1)
+                    eta = avg_time * (n_patients - idx - 1)
+                    self.logger.info(
+                        f"  Progress: {idx+1}/{n_patients} ({(idx+1)/n_patients*100:.1f}%) | "
+                        f"Last: {patient_iter_time:.1f}s | Avg: {avg_time:.1f}s/patient | "
+                        f"ETA: {eta/60:.1f}min"
+                    )
+        else:
+            # Use tqdm progress bar
+            stats_list = Parallel(n_jobs=self.cfg.num_workers, prefer="threads")(
+                delayed(_accumulate_region_stats_for_patient)(e, self.cfg.models, spacing, pulse, labels, self.cfg)
+                for e in tqdm(entries, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
+            )
+
         region_ids, Qs, Bs, counts = _reduce_region_stats(stats_list, M)
 
         # solve per-region
@@ -508,25 +534,56 @@ class PatchwiseConvexStacker:
             self.logger.log_evaluation_start(spacing, pulse, "train", n_train)
 
             train_metrics = []
-            for idx, (pid, entry) in enumerate(tqdm(train_entries, desc=f"Evaluating train ({spacing}, {pulse})", unit="patient", disable=False)):
-                pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
-                mask = hr > 0
-                metrics = {
-                    "mse": mse(pred, hr, mask),
-                    "mae": mae(pred, hr, mask),
-                    "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
-                    "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
-                }
-                train_metrics.append(metrics)
 
-                # Log per-patient metrics (less verbose)
-                if idx % 10 == 0 or idx == n_train - 1:
-                    self.logger.log_patient_metrics(pid, metrics, idx, n_train)
+            # Use tqdm only if not disabled
+            if self.cfg.disable_tqdm:
+                # SLURM-friendly logging
+                import time
+                eval_start_time = time.time()
+                for idx, (pid, entry) in enumerate(train_entries):
+                    patient_start = time.time()
+                    pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
+                    mask = hr > 0
+                    metrics = {
+                        "mse": mse(pred, hr, mask),
+                        "mae": mae(pred, hr, mask),
+                        "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
+                        "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
+                    }
+                    train_metrics.append(metrics)
+                    patient_time = time.time() - patient_start
 
-                # Save blended prediction (train blends go to model_data directory)
-                if self.cfg.save_blends:
-                    blend_path = model_data_dir / f"{pid}_blend_train.nii.gz"
-                    nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+                    # Log every 10 patients or at the end
+                    if idx % 10 == 0 or idx == n_train - 1:
+                        elapsed = time.time() - eval_start_time
+                        avg_time = elapsed / (idx + 1)
+                        self.logger.log_patient_metrics(pid, metrics, idx, n_train, elapsed_time=patient_time)
+
+                    # Save blended prediction (train blends go to model_data directory)
+                    if self.cfg.save_blends:
+                        blend_path = model_data_dir / f"{pid}_blend_train.nii.gz"
+                        nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+            else:
+                # Use tqdm progress bar
+                for idx, (pid, entry) in enumerate(tqdm(train_entries, desc=f"Evaluating train ({spacing}, {pulse})", unit="patient", disable=False)):
+                    pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
+                    mask = hr > 0
+                    metrics = {
+                        "mse": mse(pred, hr, mask),
+                        "mae": mae(pred, hr, mask),
+                        "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
+                        "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
+                    }
+                    train_metrics.append(metrics)
+
+                    # Log per-patient metrics (less verbose)
+                    if idx % 10 == 0 or idx == n_train - 1:
+                        self.logger.log_patient_metrics(pid, metrics, idx, n_train)
+
+                    # Save blended prediction (train blends go to model_data directory)
+                    if self.cfg.save_blends:
+                        blend_path = model_data_dir / f"{pid}_blend_train.nii.gz"
+                        nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
 
             # Aggregate train metrics
             if train_metrics:
@@ -545,49 +602,108 @@ class PatchwiseConvexStacker:
         test_metrics = []
         volume_shape = None  # Will be set from first test patient
 
-        for idx, (pid, entry) in enumerate(tqdm(test_entries, desc=f"Evaluating test ({spacing}, {pulse})", unit="patient", disable=False)):
-            pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
-            mask = hr > 0
+        # Use tqdm only if not disabled
+        if self.cfg.disable_tqdm:
+            # SLURM-friendly logging
+            import time
+            eval_start_time = time.time()
+            for idx, (pid, entry) in enumerate(test_entries):
+                patient_start = time.time()
+                pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
+                mask = hr > 0
 
-            # Capture volume shape for weight map saving
-            if volume_shape is None:
-                volume_shape = hr.shape[:3]
+                # Capture volume shape for weight map saving
+                if volume_shape is None:
+                    volume_shape = hr.shape[:3]
 
-            metrics = {
-                "mse": mse(pred, hr, mask),
-                "mae": mae(pred, hr, mask),
-                "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
-                "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
-            }
-            test_metrics.append(metrics)
+                metrics = {
+                    "mse": mse(pred, hr, mask),
+                    "mae": mae(pred, hr, mask),
+                    "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
+                    "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
+                }
+                test_metrics.append(metrics)
+                patient_time = time.time() - patient_start
 
-            # Log per-patient metrics (every 5 patients or last)
-            if idx % 5 == 0 or idx == n_test - 1:
-                self.logger.log_patient_metrics(pid, metrics, idx, n_test)
+                # Log every 5 patients or at the end
+                if idx % 5 == 0 or idx == n_test - 1:
+                    elapsed = time.time() - eval_start_time
+                    avg_time = elapsed / (idx + 1)
+                    eta = avg_time * (n_test - idx - 1)
+                    self.logger.info(
+                        f"  [{idx+1:3d}/{n_test:3d}] ({(idx+1)/n_test*100:5.1f}%) {pid}: "
+                        f"PSNR={metrics['psnr']:.4f} SSIM={metrics['ssim']:.4f} | "
+                        f"Time: {patient_time:.1f}s | Avg: {avg_time:.1f}s | ETA: {eta/60:.1f}min"
+                    )
 
-            # Save blended prediction to output_volumes directory
-            if self.cfg.save_blends:
-                blend_path = output_volumes_dir / f"{pid}-{pulse}.nii.gz"
-                nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
-                self.logger.log_blend_saving(blend_path, pid)
+                # Save blended prediction to output_volumes directory
+                if self.cfg.save_blends:
+                    blend_path = output_volumes_dir / f"{pid}-{pulse}.nii.gz"
+                    nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+                    self.logger.log_blend_saving(blend_path, pid)
 
-            # Save weight maps in NPZ format for test patients
-            if self.cfg.save_weight_volumes and volume_shape is not None:
-                weight_npz_path = model_data_dir / f"{pid}_weights_test.npz"
-                weights_dict_to_npz(
-                    weights_dict=wdict,
-                    volume_shape=volume_shape,
-                    patch_size=self.cfg.patch_size,
-                    stride=self.cfg.stride,
-                    model_names=list(self.cfg.models),
-                    save_path=weight_npz_path,
-                    patient_id=pid,
-                    split="test",
-                    spacing=spacing,
-                    pulse=pulse,
-                    include_analysis=True
-                )
-                self.logger.log_weight_saving(weight_npz_path, format="npz")
+                # Save weight maps in NPZ format for test patients
+                if self.cfg.save_weight_volumes and volume_shape is not None:
+                    weight_npz_path = model_data_dir / f"{pid}_weights_test.npz"
+                    weights_dict_to_npz(
+                        weights_dict=wdict,
+                        volume_shape=volume_shape,
+                        patch_size=self.cfg.patch_size,
+                        stride=self.cfg.stride,
+                        model_names=list(self.cfg.models),
+                        save_path=weight_npz_path,
+                        patient_id=pid,
+                        split="test",
+                        spacing=spacing,
+                        pulse=pulse,
+                        include_analysis=True
+                    )
+                    self.logger.log_weight_saving(weight_npz_path, format="npz")
+        else:
+            # Use tqdm progress bar
+            for idx, (pid, entry) in enumerate(tqdm(test_entries, desc=f"Evaluating test ({spacing}, {pulse})", unit="patient", disable=False)):
+                pred, ref_img, hr, _ = self.blend_entry(entry, spacing, pulse)
+                mask = hr > 0
+
+                # Capture volume shape for weight map saving
+                if volume_shape is None:
+                    volume_shape = hr.shape[:3]
+
+                metrics = {
+                    "mse": mse(pred, hr, mask),
+                    "mae": mae(pred, hr, mask),
+                    "psnr": psnr(pred, hr, data_range=float(hr.max() - hr.min()), mask=mask),
+                    "ssim": ssim3d_slicewise(pred, hr, mask=mask, axis=self.cfg.ssim_axis),
+                }
+                test_metrics.append(metrics)
+
+                # Log per-patient metrics (every 5 patients or last)
+                if idx % 5 == 0 or idx == n_test - 1:
+                    self.logger.log_patient_metrics(pid, metrics, idx, n_test)
+
+                # Save blended prediction to output_volumes directory
+                if self.cfg.save_blends:
+                    blend_path = output_volumes_dir / f"{pid}-{pulse}.nii.gz"
+                    nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
+                    self.logger.log_blend_saving(blend_path, pid)
+
+                # Save weight maps in NPZ format for test patients
+                if self.cfg.save_weight_volumes and volume_shape is not None:
+                    weight_npz_path = model_data_dir / f"{pid}_weights_test.npz"
+                    weights_dict_to_npz(
+                        weights_dict=wdict,
+                        volume_shape=volume_shape,
+                        patch_size=self.cfg.patch_size,
+                        stride=self.cfg.stride,
+                        model_names=list(self.cfg.models),
+                        save_path=weight_npz_path,
+                        patient_id=pid,
+                        split="test",
+                        spacing=spacing,
+                        pulse=pulse,
+                        include_analysis=True
+                    )
+                    self.logger.log_weight_saving(weight_npz_path, format="npz")
 
         # Aggregate test metrics
         if test_metrics:

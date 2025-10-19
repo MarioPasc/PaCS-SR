@@ -104,6 +104,7 @@ def main():
     print(f"Pulses:      {pulses_to_train}")
     print(f"Patch size:  {pacs_sr_config.patch_size}")
     print(f"Stride:      {pacs_sr_config.stride}")
+    print(f"Logging:     {'SLURM-friendly' if pacs_sr_config.disable_tqdm else 'tqdm progress bars'}")
     print(f"Output root: {pacs_sr_config.out_root}")
     print("=" * 80)
 
@@ -126,23 +127,32 @@ def main():
         model = PatchwiseConvexStacker(pacs_sr_config, fold_num=fold_num)
 
         # Train for each spacing and pulse
+        import time
         for spacing in spacings_to_train:
             for pulse in pulses_to_train:
                 task_idx += 1
+                task_start_time = time.time()
                 print(f"\n[Task {task_idx}/{total_tasks}] Training: Fold {fold_num} | {spacing} | {pulse}")
 
                 try:
                     # Train
                     weights = model.fit_one(fold_data, spacing, pulse)
-                    print(f"  ✓ Trained {len(weights)} regions")
+                    task_elapsed = time.time() - task_start_time
+                    print(f"  ✓ Trained {len(weights)} regions in {task_elapsed:.1f}s")
 
                     # Evaluate
+                    eval_start = time.time()
                     results = model.evaluate_split(fold_data, spacing, pulse)
-                    print(f"  ✓ Evaluation complete")
+                    eval_elapsed = time.time() - eval_start
+                    print(f"  ✓ Evaluation complete in {eval_elapsed:.1f}s")
                     if 'train' in results and results['train']:
                         print(f"    Train - PSNR: {results['train']['psnr']:.4f}, SSIM: {results['train']['ssim']:.4f}")
                     if 'test' in results and results['test']:
                         print(f"    Test  - PSNR: {results['test']['psnr']:.4f}, SSIM: {results['test']['ssim']:.4f}")
+
+                    # Report total task time
+                    total_task_time = time.time() - task_start_time
+                    print(f"  ✓ Total task time: {total_task_time/60:.1f}min")
 
                 except Exception as e:
                     print(f"  ✗ Error: {e}", file=sys.stderr)

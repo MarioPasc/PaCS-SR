@@ -72,6 +72,7 @@ class PacsSRConfig:
     log_level: str
     log_to_file: bool
     log_region_freq: int
+    disable_tqdm: bool  # Disable tqdm progress bars (use SLURM-friendly logging instead)
     # paths
     out_root: Path
     # data fields (populated from DataConfig in CLI)
@@ -187,6 +188,7 @@ def load_pacs_sr_config(
         log_level=str(config_dict.get("log_level", "INFO")),
         log_to_file=bool(config_dict.get("log_to_file", True)),
         log_region_freq=int(config_dict.get("log_region_freq", 10)),
+        disable_tqdm=bool(config_dict.get("disable_tqdm", False)),
         out_root=Path(config_dict["out_root"]),
         models=models,
         spacings=spacings,

@@ -59,6 +59,9 @@ y.setdefault("data", {})["out"] = manifest_path
 y.setdefault("pacs_sr", {})["out_root"] = out_root
 y["pacs_sr"]["num_workers"] = int(os.environ["SLURM_CPUS_PER_TASK"])
 
+# Enable SLURM-friendly logging (disable tqdm progress bars)
+y["pacs_sr"]["disable_tqdm"] = True
+
 with open(cfg_path, "w") as f:
     yaml.safe_dump(y, f, sort_keys=False)
 print(cfg_path)

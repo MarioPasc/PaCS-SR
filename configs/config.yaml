@@ -21,6 +21,7 @@ registration:
 pacs_sr:
   # Experiment identity
   experiment_name: "PaCS-SR_first_draft"
+  disable_tqdm: false  
   # Tile geometry
   patch_size: 32        # p in {8,16,24,32}
   stride: 16            # use patch_size for non-overlap, or patch_size//2 for 50% overlap
@@ -55,6 +56,7 @@ pacs_sr:
   log_level: "INFO"            # logging level: DEBUG, INFO, WARNING, ERROR
   log_to_file: true            # save logs to file in output directory
   log_region_freq: 10          # log region optimization progress every N regions
+  disable_tqdm: false          # set to true for SLURM-friendly logging (no progress bars)
   # Output directory
   out_root: /media/mpascual/PortableSSD/Meningiomas/tasks/superresolution/results/PACS_SR
 

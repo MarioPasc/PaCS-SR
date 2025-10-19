@@ -125,7 +125,7 @@ class PacsSRLogger:
         # Start timer
         self.timers[f"{spacing}_{pulse}_train"] = time.time()
 
-    def log_patient_progress(self, patient_id: str, idx: int, total: int):
+    def log_patient_progress(self, patient_id: str, idx: int, total: int, elapsed_time: Optional[float] = None):
         """
         Log progress during patient processing.
 
@@ -133,9 +133,13 @@ class PacsSRLogger:
             patient_id: Patient identifier
             idx: Current patient index (0-based)
             total: Total number of patients
+            elapsed_time: Optional time taken for this patient (in seconds)
         """
         progress_pct = (idx + 1) / total * 100
-        self.logger.info(f"  [{idx+1:3d}/{total:3d}] ({progress_pct:5.1f}%) Processing: {patient_id}")
+        msg = f"  [{idx+1:3d}/{total:3d}] ({progress_pct:5.1f}%) Processing: {patient_id}"
+        if elapsed_time is not None:
+            msg += f" | Time: {elapsed_time:.2f}s"
+        self.logger.info(msg)
 
     def log_region_optimization(self, region_id: int, weights: list, objective_value: Optional[float] = None):
         """
@@ -188,7 +192,7 @@ class PacsSRLogger:
         # Start timer
         self.timers[f"{spacing}_{pulse}_eval_{split}"] = time.time()
 
-    def log_patient_metrics(self, patient_id: str, metrics: Dict[str, float], idx: int, total: int):
+    def log_patient_metrics(self, patient_id: str, metrics: Dict[str, float], idx: int, total: int, elapsed_time: Optional[float] = None):
         """
         Log per-patient evaluation metrics.
 
@@ -197,10 +201,14 @@ class PacsSRLogger:
             metrics: Dictionary of metric values
             idx: Current patient index
             total: Total patients
+            elapsed_time: Optional time taken for this patient (in seconds)
         """
         progress_pct = (idx + 1) / total * 100
         metrics_str = " | ".join([f"{k.upper()}={v:.4f}" for k, v in metrics.items()])
-        self.logger.info(f"  [{idx+1:3d}/{total:3d}] ({progress_pct:5.1f}%) {patient_id}: {metrics_str}")
+        msg = f"  [{idx+1:3d}/{total:3d}] ({progress_pct:5.1f}%) {patient_id}: {metrics_str}"
+        if elapsed_time is not None:
+            msg += f" | Time: {elapsed_time:.2f}s"
+        self.logger.info(msg)
 
     def log_aggregate_metrics(self, split: str, metrics: Dict[str, float], spacing: str, pulse: str):
         """
