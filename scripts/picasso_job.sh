@@ -10,7 +10,7 @@
 #SBATCH -o %x-%A_%a.out
 #SBATCH -e %x-%A_%a.err
 
-# sbatch --export=ALL,CONFIG_YAML=/mnt/home/users/tic_163_uma/mpascual/fscratch/repos/PaCS-SR/configs/picasso.yaml,CONDA_ENV=pacs,RESULTS_HOME=$HOME/pacs-sr/results pacs_sr_array.sbatch
+# sbatch --export=ALL,CONFIG_YAML=/mnt/home/users/tic_163_uma/mpascual/fscratch/repos/PaCS-SR/configs/picasso.yaml,CONDA_ENV=pacs,RESULTS_HOME=$HOME/pacs-sr/results picasso_job.sh
 
 
 set -euo pipefail
@@ -40,7 +40,7 @@ export JOBLIB_TEMP_FOLDER="${WORKDIR}/joblib_tmp"
 mkdir -p "$JOBLIB_TEMP_FOLDER"
 
 # runtime config (YAML edits done via Python for correctness)
-RUNTIME_CFG="${WORKDIR}/config.runtime.yaml"
+export RUNTIME_CFG="${WORKDIR}/config.runtime.yaml"
 cp "$CONFIG_YAML" "$RUNTIME_CFG"
 
 python - <<'PY'
