@@ -9,6 +9,8 @@ import numpy as np
 import nibabel as nib
 from joblib import Parallel, delayed
 from scipy.optimize import minimize
+from scipy import ndimage as ndi
+from scipy.signal import windows as sigwin
 from tqdm import tqdm
 
 from pacs_sr.config.config import PacsSRConfig
@@ -39,14 +41,69 @@ def _patient_paths(entry: Dict, models: Tuple[str, ...], spacing: str, pulse: st
     hr_path = Path(entry["HR"][spacing][pulse])
     return sr_paths, hr_path
 
+def _grad3d(vol: Array, op: str) -> tuple[Array, Array, Array]:
+    """
+    3D gradients per axis. Supports 'sobel', 'prewitt', 'scharr'.
+    Returns (gx, gy, gz), each float32.
+    """
+    op = op.lower()
+    v = vol.astype(np.float32, copy=False)
+
+    if op == "sobel":
+        gx = ndi.sobel(v, axis=2, mode="nearest")
+        gy = ndi.sobel(v, axis=1, mode="nearest")
+        gz = ndi.sobel(v, axis=0, mode="nearest")
+        return gx, gy, gz
+
+    if op == "prewitt":
+        gx = ndi.prewitt(v, axis=2, mode="nearest")
+        gy = ndi.prewitt(v, axis=1, mode="nearest")
+        gz = ndi.prewitt(v, axis=0, mode="nearest")
+        return gx, gy, gz
+
+    if op == "scharr":
+        # 3D Scharr via separable outer products:
+        # derivative d=[1,0,-1] along target axis; smoothing s=[3,10,3] along the others
+        d = np.array([1, 0, -1], dtype=np.float32)
+        s = np.array([3, 10, 3], dtype=np.float32)
+
+        def kx():
+            # x-derivative: d(x) ⊗ s(y) ⊗ s(z)
+            return np.einsum("z,y,x->zyx", s, s, d)
+        def ky():
+            # y-derivative: s(x) ⊗ d(y) ⊗ s(z)
+            return np.einsum("z,y,x->zyx", s, d, s)
+        def kz():
+            # z-derivative: d(z) ⊗ s(y) ⊗ s(x) but axes order is (z,y,x)
+            return np.einsum("z,y,x->zyx", d, s, s)
+
+        gx = ndi.convolve(v, kx(), mode="nearest")
+        gy = ndi.convolve(v, ky(), mode="nearest")
+        gz = ndi.convolve(v, kz(), mode="nearest")
+        return gx, gy, gz
+
+    raise ValueError(f"Unknown grad_operator '{op}'")
+
+def _tile_window(sz: tuple[int,int,int], kind: str) -> Array:
+    """
+    3D separable window of size (Z,Y,X). 'hann' or 'flat'.
+    """
+    if kind == "hann":
+        wz = sigwin.hann(sz[0], sym=True).astype(np.float32)
+        wy = sigwin.hann(sz[1], sym=True).astype(np.float32)
+        wx = sigwin.hann(sz[2], sym=True).astype(np.float32)
+        w3 = (wz[:, None, None] * wy[None, :, None] * wx[None, None, :]).astype(np.float32)
+        return w3
+    # flat
+    return np.ones(sz, dtype=np.float32)
+
 def _compute_edge_weights(hr: Array, lam_edge: float, edge_power: float) -> Array:
     if lam_edge <= 0:
         return np.ones_like(hr, dtype=np.float32)
     # Sobel gradients per axis
-    from scipy.ndimage import sobel
-    gx = sobel(hr, axis=0, mode="nearest")
-    gy = sobel(hr, axis=1, mode="nearest")
-    gz = sobel(hr, axis=2, mode="nearest")
+    gx = ndi.sobel(hr, axis=0, mode="nearest")
+    gy = ndi.sobel(hr, axis=1, mode="nearest")
+    gz = ndi.sobel(hr, axis=2, mode="nearest")
     g = np.sqrt(gx*gx + gy*gy + gz*gz)
     gmax = float(np.max(g)) + 1e-6
     w = 1.0 + lam_edge * (g / gmax) ** edge_power
@@ -81,8 +138,16 @@ def _accumulate_region_stats_for_patient(
     # weights for edge emphasis
     wv = _compute_edge_weights(hr, cfg.lambda_edge, cfg.edge_power) * mask.astype(np.float32)
 
+    # compute HR gradients after normalization
+    hr_gx = hr_gy = hr_gz = None
+    if cfg.lambda_grad > 0:
+        hr_gx, hr_gy, hr_gz = _grad3d(hr, cfg.grad_operator)
+
     # load expert predictions and apply same preprocessing
     X = []
+    GX = []
+    GY = []
+    GZ = []
     for p in sr_paths:
         xi_img = _load_nii(p)
         xi = _get_data32(xi_img)
@@ -96,7 +161,17 @@ def _accumulate_region_stats_for_patient(
             xi, _ = zscore(xi, mask=mask)
 
         X.append(xi.astype(np.float32))
+        if cfg.lambda_grad > 0:
+            gx, gy, gz = _grad3d(xi, cfg.grad_operator)
+            GX.append(gx)
+            GY.append(gy)
+            GZ.append(gz)
+
     X = np.stack(X, axis=0)  # (M, Z, Y, X)
+    if cfg.lambda_grad > 0:
+        GX = np.stack(GX, axis=0)  # (M, Z, Y, X)
+        GY = np.stack(GY, axis=0)
+        GZ = np.stack(GZ, axis=0)
     M = X.shape[0]
 
     # iterate regions
@@ -116,6 +191,24 @@ def _accumulate_region_stats_for_patient(
         xw = x * ww  # (M,n)
         Q = xw @ x.T  # (M,M)
         B = xw @ y    # (M,)
+
+        # add gradient terms if enabled
+        if cfg.lambda_grad > 0:
+            # expert gradients restricted to region
+            gx = np.stack([gi[selm] for gi in GX], axis=0)  # (M, n)
+            gy = np.stack([gi[selm] for gi in GY], axis=0)
+            gz = np.stack([gi[selm] for gi in GZ], axis=0)
+            # target gradients
+            ygx = hr_gx[selm]
+            ygy = hr_gy[selm]
+            ygz = hr_gz[selm]
+            # weight by ww then accumulate axiswise
+            lam = float(cfg.lambda_grad)
+            for G, ygrad in ((gx, ygx), (gy, ygy), (gz, ygz)):
+                Gw = G * ww           # (M, n)
+                Q += lam * (Gw @ G.T)  # add gradient-domain quadratic
+                B += lam * (Gw @ ygrad)
+
         prev = stats.get(rid)
         if prev is None:
             stats[rid] = RegionStats(Q=Q, B=B, vox=nvox)
@@ -268,7 +361,11 @@ class PatchwiseConvexStacker:
         if self.cfg.laplacian_tau > 0:
             self.logger.info(f"\nApplying Laplacian smoothing (tau={self.cfg.laplacian_tau})...")
             adj = region_adjacency_from_labels(labels)
-            W = laplacian_smooth_weights(W, adj, tau=self.cfg.laplacian_tau, n_iter=1)
+            # Convert adjacency from region IDs to array indices
+            rid_to_idx = {rid: i for i, rid in enumerate(region_ids)}
+            adj_indexed = {rid_to_idx[rid]: {rid_to_idx[n] for n in neighbors if n in rid_to_idx}
+                          for rid, neighbors in adj.items() if rid in rid_to_idx}
+            W = laplacian_smooth_weights(W, adj_indexed, tau=self.cfg.laplacian_tau, n_iter=1)
 
         # store
         wdict = {int(rid): W[i] for i, rid in enumerate(region_ids)}
@@ -319,16 +416,40 @@ class PatchwiseConvexStacker:
             X.append(xi.astype(np.float32))
         X = np.stack(X, axis=0)  # (M, Z, Y, X)
 
-        # Perform blending (cross product of weights and expert opinions)
-        blended_n = np.zeros_like(hr_n, dtype=np.float32)
+        # Perform blending with overlap-add
+        accum = np.zeros_like(hr_n, dtype=np.float32)
+        weight = np.zeros_like(hr_n, dtype=np.float32)
+
         for rid in rids:
-            sel = labels == rid
+            # bounding box of this tile (labels were built as regular tiles, so bbox is rectangular)
+            zz, yy, xx = np.where(labels == rid)
+            if zz.size == 0:
+                continue
+            z0, z1 = int(zz.min()), int(zz.max()+1)
+            y0, y1 = int(yy.min()), int(yy.max()+1)
+            x0, x1 = int(xx.min()), int(xx.max()+1)
+            sel = labels[z0:z1, y0:y1, x0:x1] == rid
+
             w = wdict.get(int(rid))
             if w is None:
                 w = np.ones((X.shape[0],), dtype=np.float32) / X.shape[0]
-            # linear blend inside tile
-            tile = np.tensordot(w.astype(np.float32), X[:, sel], axes=(0,0))
-            blended_n[sel] = tile.astype(np.float32)
+
+            # compute tile blend on this subvolume only
+            # flatten boolean mask sel to pull voxel list
+            flat_sel = sel.reshape(-1)
+            tile_vals = np.tensordot(w.astype(np.float32), X[:, z0:z1, y0:y1, x0:x1].reshape(X.shape[0], -1), axes=(0,0))
+            tile_vals = tile_vals.reshape(sel.shape)
+
+            # make window of the actual tile size (handles border tiles shorter than patch_size)
+            w3 = _tile_window((z1-z0, y1-y0, x1-x0), self.cfg.mixing_window)
+
+            # overlap-add
+            accum[z0:z1, y0:y1, x0:x1] += (w3 * tile_vals).astype(np.float32)
+            weight[z0:z1, y0:y1, x0:x1] += w3
+
+        # finalize
+        eps = 1e-8
+        blended_n = accum / (weight + eps)
 
         # Postprocessing: registration already applied during preprocessing
         # No need to register again since all volumes are already in atlas space
@@ -408,8 +529,11 @@ class PatchwiseConvexStacker:
                     nib.save(nib.Nifti1Image(pred.astype(np.float32), ref_img.affine, ref_img.header), blend_path)
 
             # Aggregate train metrics
-            results["train"] = {k: float(np.mean([m[k] for m in train_metrics])) for k in train_metrics[0].keys()}
-            self.logger.log_aggregate_metrics("train", results["train"], spacing, pulse)
+            if train_metrics:
+                results["train"] = {k: float(np.mean([m[k] for m in train_metrics])) for k in train_metrics[0].keys()}
+                self.logger.log_aggregate_metrics("train", results["train"], spacing, pulse)
+            else:
+                self.logger.warning("No train metrics to aggregate (empty train set)")
         else:
             self.logger.info(f"Skipping train evaluation (evaluate_train=False)")
 
@@ -466,8 +590,12 @@ class PatchwiseConvexStacker:
                 self.logger.log_weight_saving(weight_npz_path, format="npz")
 
         # Aggregate test metrics
-        results["test"] = {k: float(np.mean([m[k] for m in test_metrics])) for k in test_metrics[0].keys()}
-        self.logger.log_aggregate_metrics("test", results["test"], spacing, pulse)
+        if test_metrics:
+            results["test"] = {k: float(np.mean([m[k] for m in test_metrics])) for k in test_metrics[0].keys()}
+            self.logger.log_aggregate_metrics("test", results["test"], spacing, pulse)
+        else:
+            self.logger.warning("No test metrics to aggregate (empty test set)")
+            results["test"] = {}
 
         # Save weights dictionary as JSON (for compatibility)
         weights_json_path = model_data_dir / "weights.json"

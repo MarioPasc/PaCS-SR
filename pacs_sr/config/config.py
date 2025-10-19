@@ -48,6 +48,11 @@ class PacsSRConfig:
     # edge weighting
     lambda_edge: float
     edge_power: float
+    # gradient-domain augmentation
+    lambda_grad: float
+    grad_operator: str
+    # overlap-add blending
+    mixing_window: str
     # normalization
     normalize: str
     # registration
@@ -166,6 +171,9 @@ def load_pacs_sr_config(
         laplacian_tau=float(config_dict["laplacian_tau"]),
         lambda_edge=float(config_dict["lambda_edge"]),
         edge_power=float(config_dict["edge_power"]),
+        lambda_grad=float(config_dict.get("lambda_grad", 0.0)),
+        grad_operator=str(config_dict.get("grad_operator", "sobel")).lower(),
+        mixing_window=str(config_dict.get("mixing_window", "flat")).lower(),
         normalize=str(config_dict["normalize"]),
         use_registration=bool(config_dict.get("use_registration", False)),
         atlas_dir=atlas_dir,

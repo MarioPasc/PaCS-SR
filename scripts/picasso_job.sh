@@ -1,67 +1,104 @@
 #!/usr/bin/env bash
-#SBATCH -J pacs-sr-train
+#SBATCH -J pacs-sr-array
 #SBATCH -N 1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=64
-#SBATCH --mem=120G
+#SBATCH --cpus-per-task=32
+#SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
+#SBATCH --array=1-60
 #SBATCH --constraint=cal
-#SBATCH -o %x-%j.out
-#SBATCH -e %x-%j.err
+#SBATCH -o %x-%A_%a.out
+#SBATCH -e %x-%A_%a.err
+
+# sbatch --export=ALL,CONFIG_YAML=/mnt/home/users/tic_163_uma/mpascual/fscratch/repos/PaCS-SR/configs/picasso.yaml,CONDA_ENV=pacs,RESULTS_HOME=$HOME/pacs-sr/results pacs_sr_array.sbatch
+
 
 set -euo pipefail
 
-# --- user inputs --------------------------------------------------------------
-: "${CONFIG_YAML:?set CONFIG_YAML=/path/to/config.yaml before sbatch}"
-CONDA_ENV="${CONDA_ENV:-pacs-sr}"               # name of your conda env (change if needed)
-RESULTS_HOME="${RESULTS_HOME:-$HOME/pacs-sr}"   # where to persist final results
-FOLD_OPT="${FOLD:+--fold $FOLD}"                # optional: export FOLD=1
-SPACING_OPT="${SPACING:+--spacing $SPACING}"    # optional: export SPACING=3mm
-PULSE_OPT="${PULSE:+--pulse $PULSE}"            # optional: export PULSE=t1c
-# ------------------------------------------------------------------------------
+# -------- user inputs ----------
+: "${CONFIG_YAML:?set CONFIG_YAML=/abs/path/to/config.yaml before sbatch}"
+CONDA_ENV="${CONDA_ENV:-pacs-sr}"
+RESULTS_HOME="${RESULTS_HOME:-$HOME/pacs-sr/results}"   # shared, persistent
+# -------------------------------
 
-# Load software via modules, as required on Picasso
+# Picasso env
 module purge
-module load anaconda                             # load the site-provided Anaconda
-# (list modules with `module avail`; keep `module load` inside the SBATCH script)  # :contentReference[oaicite:0]{index=0}
+module load anaconda
 source activate "$CONDA_ENV"
 
-# Avoid BLAS oversubscription; let joblib control threading
+# prevent BLAS over-subscription; joblib owns parallelism
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 export PYTHONUNBUFFERED=1
 
-# Use FSCRATCH for working directory and joblib temps (not LOCALSCRATCH)
-WORKDIR="${FSCRATCH}/${USER}/pacs-sr/${SLURM_JOB_ID}"
+# working dirs in FSCRATCH (no localscratch)
+WORKDIR="${FSCRATCH}/${USER}/pacs-sr/${SLURM_JOB_ID}/${SLURM_ARRAY_TASK_ID}"
 mkdir -p "$WORKDIR"
 export JOBLIB_TEMP_FOLDER="${WORKDIR}/joblib_tmp"
 mkdir -p "$JOBLIB_TEMP_FOLDER"
 
-# Prepare a runtime config that:
-#   - writes the manifest to FSCRATCH
-#   - writes results under FSCRATCH
-#   - sets pacs_sr.num_workers = $SLURM_CPUS_PER_TASK
+# runtime config (YAML edits done via Python for correctness)
 RUNTIME_CFG="${WORKDIR}/config.runtime.yaml"
 cp "$CONFIG_YAML" "$RUNTIME_CFG"
 
-MANIFEST_PATH="${WORKDIR}/kfolds_manifest.json"
-RESULTS_DIR="${WORKDIR}/results"
-# crude but effective YAML line edits (one occurrence per key expected)
-sed -i -E "s|(^[[:space:]]*out:[[:space:]]*).*$|\1 ${MANIFEST_PATH}|" "$RUNTIME_CFG"
-sed -i -E "s|(^[[:space:]]*out_root:[[:space:]]*).*$|\1 ${RESULTS_DIR}|" "$RUNTIME_CFG"
-sed -i -E "s|(^[[:space:]]*num_workers:[[:space:]]*).*$|\1 ${SLURM_CPUS_PER_TASK}|" "$RUNTIME_CFG"
+python - <<'PY'
+import sys, yaml, os, pathlib
+cfg_path = os.environ["RUNTIME_CFG"]
+with open(cfg_path) as f:
+    y = yaml.safe_load(f)
 
-# Build manifest and train; run under srun to bind resources from Slurm
-time srun pacs-sr-build-manifest --config "$RUNTIME_CFG"
-time srun pacs-sr-train --config "$RUNTIME_CFG" ${FOLD_OPT:-} ${SPACING_OPT:-} ${PULSE_OPT:-}
+# manifest path shared across array tasks
+manifest_path = os.path.join(os.environ["RESULTS_HOME"], "kfolds_manifest.json")
+# shared output root for all tasks (final, persistent)
+out_root = os.environ["RESULTS_HOME"]
 
-# Persist outputs to HOME (FSCRATCH is purged periodically)
-mkdir -p "$RESULTS_HOME/${SLURM_JOB_ID}"
-rsync -a "${RESULTS_DIR}/" "$RESULTS_HOME/${SLURM_JOB_ID}/"
-cp -f "$RUNTIME_CFG" "$RESULTS_HOME/${SLURM_JOB_ID}/"
-cp -f "$MANIFEST_PATH" "$RESULTS_HOME/${SLURM_JOB_ID}/"
+# update YAML
+y.setdefault("data", {})["out"] = manifest_path
+y.setdefault("pacs_sr", {})["out_root"] = out_root
+y["pacs_sr"]["num_workers"] = int(os.environ["SLURM_CPUS_PER_TASK"])
 
-# Post-run efficiency report
+with open(cfg_path, "w") as f:
+    yaml.safe_dump(y, f, sort_keys=False)
+print(cfg_path)
+PY
+
+# build manifest once with file lock
+LOCK="${RESULTS_HOME}/.manifest.lock"
+MANIFEST="${RESULTS_HOME}/kfolds_manifest.json"
+mkdir -p "$RESULTS_HOME"
+(
+  flock -n 200 || true
+  if [ ! -f "$MANIFEST" ]; then
+    echo "Building manifest at $MANIFEST"
+    srun pacs-sr-build-manifest --config "$RUNTIME_CFG"
+  fi
+) 200>"$LOCK"
+
+# array mapping: 5 folds × 3 spacings × 4 pulses = 60 tasks
+FOLDS=(1 2 3 4 5)
+SPACINGS=("3mm" "5mm" "7mm")
+PULSES=("t1c" "t1n" "t2w" "t2f")
+
+IDX=$(( SLURM_ARRAY_TASK_ID - 1 ))
+NF=${#FOLDS[@]}    # 5
+NS=${#SPACINGS[@]} # 3
+NP=${#PULSES[@]}   # 4
+
+fi=$(( IDX / (NS*NP) ))
+rem=$(( IDX % (NS*NP) ))
+si=$(( rem / NP ))
+pi=$(( rem % NP ))
+
+FOLD="${FOLDS[$fi]}"
+SPACING="${SPACINGS[$si]}"
+PULSE="${PULSES[$pi]}"
+
+echo "Task ${SLURM_ARRAY_TASK_ID}: fold=${FOLD} spacing=${SPACING} pulse=${PULSE}"
+
+# train one triple
+time srun pacs-sr-train --config "$RUNTIME_CFG" --fold "$FOLD" --spacing "$SPACING" --pulse "$PULSE"
+
+# efficiency report
 seff "$SLURM_JOB_ID" || true

@@ -139,8 +139,10 @@ def main():
                     # Evaluate
                     results = model.evaluate_split(fold_data, spacing, pulse)
                     print(f"  ✓ Evaluation complete")
-                    print(f"    Train - PSNR: {results['train']['psnr']:.4f}, SSIM: {results['train']['ssim']:.4f}")
-                    print(f"    Test  - PSNR: {results['test']['psnr']:.4f}, SSIM: {results['test']['ssim']:.4f}")
+                    if 'train' in results and results['train']:
+                        print(f"    Train - PSNR: {results['train']['psnr']:.4f}, SSIM: {results['train']['ssim']:.4f}")
+                    if 'test' in results and results['test']:
+                        print(f"    Test  - PSNR: {results['test']['psnr']:.4f}, SSIM: {results['test']['ssim']:.4f}")
 
                 except Exception as e:
                     print(f"  ✗ Error: {e}", file=sys.stderr)
