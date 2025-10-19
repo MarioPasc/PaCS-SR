@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pacs-sr"
+version = "0.1.0"
+description = "Patchwise Convex Stacking for 3D MRI Super-Resolution under Clinical Anisotropy"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [
+  { name="PaCS-SR Authors", email="author@example.com" },
+]
+dependencies = [
+  "numpy>=1.23",
+  "scipy>=1.10",
+  "nibabel>=5.0",
+  "scikit-image>=0.21",
+  "joblib>=1.3",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+torch = ["torch>=2.1", "lpips>=0.1.4", "torchvision>=0.16"]
+dev = ["ruff", "mypy", "pytest"]
+
+[project.scripts]
+pacs-sr-build-manifest = "pacs_sr.cli.build_manifest:main"
+pacs-sr-train = "pacs_sr.cli.train:main"
+pacs-sr-predict = "pacs_sr.cli.predict:main"
+
+[tool.setuptools]
+packages = ["pacs_sr", "pacs_sr.config", "pacs_sr.model", "pacs_sr.utils", "pacs_sr.data", "pacs_sr.cli"]
