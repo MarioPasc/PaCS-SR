@@ -147,7 +147,29 @@ def _accumulate_region_stats_for_patient(
     if cfg.use_registration and cfg.atlas_dir is not None:
         hr, _ = register_and_mask(hr, hr_img.affine, pulse, cfg.atlas_dir)
 
-    # Foreground mask from HR > 0 (after registration if enabled)
+    # Load all expert predictions first to determine common shape
+    expert_volumes = []
+    for p in sr_paths:
+        xi_img = _load_nii(p)
+        xi = _get_data32(xi_img)
+        # Preprocessing: register expert predictions (before normalization)
+        if cfg.use_registration and cfg.atlas_dir is not None:
+            xi, _ = register_and_mask(xi, xi_img.affine, pulse, cfg.atlas_dir)
+        expert_volumes.append(xi)
+
+    # Find maximum common shape across HR and all experts (to preserve all information)
+    all_shapes = [hr.shape] + [xi.shape for xi in expert_volumes]
+    max_shape = tuple(max(shapes[i] for shapes in all_shapes) for i in range(3))
+
+    # Resize HR to max shape using bicubic interpolation if needed
+    if hr.shape != max_shape:
+        from scipy.ndimage import zoom
+        zoom_factors = tuple(max_shape[i] / hr.shape[i] for i in range(3))
+        hr = zoom(hr, zoom_factors, order=3)  # order=3 for bicubic
+        # Also resize labels to match
+        labels = zoom(labels, zoom_factors, order=0).astype(np.int32)  # order=0 for nearest-neighbor on labels
+
+    # Foreground mask from HR > 0 (after cropping and registration)
     mask = hr > 0
 
     # z-score normalization under mask
@@ -162,18 +184,17 @@ def _accumulate_region_stats_for_patient(
     if cfg.lambda_grad > 0:
         hr_gx, hr_gy, hr_gz = _grad3d(hr, cfg.grad_operator)
 
-    # load expert predictions and apply same preprocessing
+    # Process expert predictions with common shape
     X = []
     GX = []
     GY = []
     GZ = []
-    for p in sr_paths:
-        xi_img = _load_nii(p)
-        xi = _get_data32(xi_img)
-
-        # Preprocessing: register expert predictions (before normalization)
-        if cfg.use_registration and cfg.atlas_dir is not None:
-            xi, _ = register_and_mask(xi, xi_img.affine, pulse, cfg.atlas_dir)
+    for xi in expert_volumes:
+        # Resize to max shape using bicubic interpolation if needed
+        if xi.shape != max_shape:
+            from scipy.ndimage import zoom
+            zoom_factors = tuple(max_shape[i] / xi.shape[i] for i in range(3))
+            xi = zoom(xi, zoom_factors, order=3)  # order=3 for bicubic
 
         # z-score normalization with same mask as HR
         if cfg.normalize == "zscore":
@@ -583,6 +604,28 @@ class PatchwiseConvexStacker:
         labels, rids = self._labels_for_shape(hr.shape[:3])
         wdict = self.weights_[(spacing, pulse)]
 
+        # Load all expert predictions first to determine common shape
+        expert_volumes = []
+        for p in sr_paths:
+            xi_img = _load_nii(p)
+            xi = _get_data32(xi_img)
+            # Preprocessing: register expert predictions
+            if self.cfg.use_registration and self.cfg.atlas_dir is not None:
+                xi, _ = register_and_mask(xi, xi_img.affine, pulse, self.cfg.atlas_dir)
+            expert_volumes.append(xi)
+
+        # Find maximum common shape across HR and all experts (to preserve all information)
+        all_shapes = [hr.shape] + [xi.shape for xi in expert_volumes]
+        max_shape = tuple(max(shapes[i] for shapes in all_shapes) for i in range(3))
+
+        # Resize HR and labels to max shape using bicubic interpolation if needed
+        if hr.shape != max_shape:
+            from scipy.ndimage import zoom
+            zoom_factors = tuple(max_shape[i] / hr.shape[i] for i in range(3))
+            hr = zoom(hr, zoom_factors, order=3)  # order=3 for bicubic
+            # Also resize labels to match
+            labels = zoom(labels, zoom_factors, order=0).astype(np.int32)  # order=0 for nearest-neighbor on labels
+
         # normalization params for HR
         mask = hr > 0
         if self.cfg.normalize == "zscore":
@@ -590,15 +633,14 @@ class PatchwiseConvexStacker:
         else:
             hr_n, hr_z = hr, ZScoreParams(mean=0.0, std=1.0)
 
-        # load experts and apply same preprocessing
+        # Process expert predictions with common shape
         X = []
-        for p in sr_paths:
-            xi_img = _load_nii(p)
-            xi = _get_data32(xi_img)
-
-            # Preprocessing: register expert predictions
-            if self.cfg.use_registration and self.cfg.atlas_dir is not None:
-                xi, _ = register_and_mask(xi, xi_img.affine, pulse, self.cfg.atlas_dir)
+        for xi in expert_volumes:
+            # Resize to max shape using bicubic interpolation if needed
+            if xi.shape != max_shape:
+                from scipy.ndimage import zoom
+                zoom_factors = tuple(max_shape[i] / xi.shape[i] for i in range(3))
+                xi = zoom(xi, zoom_factors, order=3)  # order=3 for bicubic
 
             # Normalize with same mask as HR
             if self.cfg.normalize == "zscore":
