@@ -1,6 +1,21 @@
 from __future__ import annotations
 import numpy as np
-from typing import Tuple
+from typing import Iterator, Tuple
+
+def tile_boxes(shape: Tuple[int,int,int], patch_size: int, stride: int
+               ) -> Iterator[Tuple[int, Tuple[int,int,int,int,int,int]]]:
+    """
+    Yield (rid, (z0,z1,y0,y1,x0,x1)) in the same order used by region_labels().
+    """
+    Z, Y, X = shape
+    p, s = patch_size, stride
+    rid = 0
+    for z0 in range(0, Z, s):
+        for y0 in range(0, Y, s):
+            for x0 in range(0, X, s):
+                z1, y1, x1 = min(z0+p, Z), min(y0+p, Y), min(x0+p, X)
+                yield rid, (z0, z1, y0, y1, x0, x1)
+                rid += 1
 
 def region_labels(shape: Tuple[int, int, int], patch_size: int, stride: int) -> np.ndarray:
     """

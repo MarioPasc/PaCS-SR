@@ -60,6 +60,7 @@ class PacsSRConfig:
     atlas_dir: Optional[Path]
     # compute
     num_workers: int
+    parallel_backend: str
     device: str
     # metrics
     compute_lpips: bool
@@ -179,6 +180,7 @@ def load_pacs_sr_config(
         use_registration=bool(config_dict.get("use_registration", False)),
         atlas_dir=atlas_dir,
         num_workers=int(config_dict["num_workers"]),
+        parallel_backend=str(config_dict.get("parallel_backend", "loky")),
         device=str(config_dict["device"]),
         compute_lpips=bool(config_dict["compute_lpips"]),
         ssim_axis=str(config_dict["ssim_axis"]),

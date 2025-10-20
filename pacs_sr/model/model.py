@@ -7,14 +7,14 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import nibabel as nib
-from joblib import Parallel, delayed
 from scipy.optimize import minimize
 from scipy import ndimage as ndi
 from scipy.signal import windows as sigwin
 from tqdm import tqdm
 
 from pacs_sr.config.config import PacsSRConfig
-from pacs_sr.utils.patches import region_labels, region_adjacency_from_labels
+from pacs_sr.utils.patches import region_labels, region_adjacency_from_labels, tile_boxes
+from pacs_sr.utils.parallel import create_backend
 from pacs_sr.utils.zscore import zscore, inverse_zscore, ZScoreParams
 from pacs_sr.utils.registration import register_and_mask, apply_brain_mask
 from pacs_sr.model.metrics import psnr, ssim3d_slicewise, mae, mse
@@ -90,15 +90,13 @@ def _grad3d(vol: Array, op: str) -> tuple[Array, Array, Array]:
 
 def _tile_window(sz: tuple[int,int,int], kind: str) -> Array:
     """
-    3D separable window of size (Z,Y,X). 'hann' or 'flat'.
+    3D separable window. Use periodic Hann (sym=False) for COLA at 50% overlap.
     """
     if kind == "hann":
-        wz = sigwin.hann(sz[0], sym=True).astype(np.float32)
-        wy = sigwin.hann(sz[1], sym=True).astype(np.float32)
-        wx = sigwin.hann(sz[2], sym=True).astype(np.float32)
-        w3 = (wz[:, None, None] * wy[None, :, None] * wx[None, None, :]).astype(np.float32)
-        return w3
-    # flat
+        wz = sigwin.hann(sz[0], sym=False).astype(np.float32)
+        wy = sigwin.hann(sz[1], sym=False).astype(np.float32)
+        wx = sigwin.hann(sz[2], sym=False).astype(np.float32)
+        return (wz[:, None, None] * wy[None, :, None] * wx[None, None, :]).astype(np.float32)
     return np.ones(sz, dtype=np.float32)
 
 def _compute_edge_weights(hr: Array, lam_edge: float, edge_power: float) -> Array:
@@ -392,16 +390,33 @@ class PatchwiseConvexStacker:
             if skipped_patients:
                 self.logger.warning(f"Skipped {len(skipped_patients)} corrupted patient(s): {', '.join(skipped_patients)}")
         else:
-            # Use tqdm progress bar (with safe wrapper to handle corrupted files)
-            stats_list_raw = Parallel(n_jobs=self.cfg.num_workers, prefer="threads")(
-                delayed(_accumulate_region_stats_for_patient_safe)(e, self.cfg.models, spacing, pulse, labels, self.cfg)
-                for e in tqdm(entries, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
+            # Use parallel backend with tqdm progress bar
+            # Create backend with configured parallelization strategy
+            backend = create_backend(
+                backend=self.cfg.parallel_backend,
+                n_jobs=self.cfg.num_workers,
+                verbose=0  # tqdm handles progress display
             )
+
+            # Prepare argument tuples for starmap
+            tasks = [(e, self.cfg.models, spacing, pulse, labels, self.cfg) for e in entries]
+
+            # Execute with context manager for automatic cleanup
+            with backend.parallel_context() as parallel:
+                from joblib import delayed
+                stats_list_raw = parallel(
+                    delayed(_accumulate_region_stats_for_patient_safe)(*args)
+                    for args in tqdm(tasks, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
+                )
+
             # Filter out None results (corrupted patients)
             stats_list = [s for s in stats_list_raw if s is not None]
             n_skipped = len(stats_list_raw) - len(stats_list)
             if n_skipped > 0:
                 self.logger.warning(f"Skipped {n_skipped} corrupted patient(s) during parallel processing")
+
+            # Cleanup backend resources
+            backend.cleanup()
 
         region_ids, Qs, Bs, counts = _reduce_region_stats(stats_list, M)
 
@@ -479,35 +494,27 @@ class PatchwiseConvexStacker:
             X.append(xi.astype(np.float32))
         X = np.stack(X, axis=0)  # (M, Z, Y, X)
 
-        # Perform blending with overlap-add
+        # Choose mixing window; force flat if no overlap
+        win_kind = self.cfg.mixing_window
+        if self.cfg.stride >= self.cfg.patch_size:
+            win_kind = "flat"
+
+        # Perform blending with overlap-add using deterministic tile grid
         accum = np.zeros_like(hr_n, dtype=np.float32)
         weight = np.zeros_like(hr_n, dtype=np.float32)
 
-        for rid in rids:
-            # bounding box of this tile (labels were built as regular tiles, so bbox is rectangular)
-            zz, yy, xx = np.where(labels == rid)
-            if zz.size == 0:
-                continue
-            z0, z1 = int(zz.min()), int(zz.max()+1)
-            y0, y1 = int(yy.min()), int(yy.max()+1)
-            x0, x1 = int(xx.min()), int(xx.max()+1)
-            sel = labels[z0:z1, y0:y1, x0:x1] == rid
-
+        # Iterate exact tile boxes; DO NOT derive from labels for overlap cases
+        for rid, (z0,z1,y0,y1,x0,x1) in tile_boxes(hr.shape[:3], self.cfg.patch_size, self.cfg.stride):
             w = wdict.get(int(rid))
             if w is None:
                 w = np.ones((X.shape[0],), dtype=np.float32) / X.shape[0]
 
-            # compute tile blend on this subvolume only
-            # flatten boolean mask sel to pull voxel list
-            flat_sel = sel.reshape(-1)
-            tile_vals = np.tensordot(w.astype(np.float32), X[:, z0:z1, y0:y1, x0:x1].reshape(X.shape[0], -1), axes=(0,0))
-            tile_vals = tile_vals.reshape(sel.shape)
+            sub = X[:, z0:z1, y0:y1, x0:x1]                       # (M, dz, dy, dx)
+            tile_vals = np.tensordot(w.astype(np.float32), sub.reshape(sub.shape[0], -1), axes=(0,0))
+            tile_vals = tile_vals.reshape(sub.shape[1:])           # (dz, dy, dx)
 
-            # make window of the actual tile size (handles border tiles shorter than patch_size)
-            w3 = _tile_window((z1-z0, y1-y0, x1-x0), self.cfg.mixing_window)
-
-            # overlap-add
-            accum[z0:z1, y0:y1, x0:x1] += (w3 * tile_vals).astype(np.float32)
+            w3 = _tile_window(tile_vals.shape, win_kind)
+            accum[z0:z1, y0:y1, x0:x1] += w3 * tile_vals
             weight[z0:z1, y0:y1, x0:x1] += w3
 
         # finalize

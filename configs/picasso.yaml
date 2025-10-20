@@ -21,7 +21,6 @@ registration:
 pacs_sr:
   # Experiment identity
   experiment_name: "PaCS-SR_picasso_experiment"
-  disable_tqdm: true  # Enable SLURM-friendly logging
   # Tile geometry
   patch_size: 32        # p in {8,16,24,32}
   stride: 16            # use patch_size for non-overlap, or patch_size//2 for 50% overlap
@@ -30,7 +29,7 @@ pacs_sr:
   # Optimization
   simplex: true         # enforce w >= 0 and sum(w)=1
   lambda_ridge: 1.0e-4  # small ridge to condition the Q matrix per region
-  laplacian_tau: 0.05    # optional smoothing of regional weights across adjacency graph
+  laplacian_tau: 0.10    # optional smoothing of regional weights across adjacency graph
   # Edge-aware voxel reweighting for statistics accumulation
   lambda_edge: 0.25      # 0 disables edge emphasis
   edge_power: 2.0
@@ -42,13 +41,14 @@ pacs_sr:
   # Registration
   use_registration: true  # enable atlas-based registration and brain masking
   # I/O and compute
-  num_workers: 6        # parallel workers for per-patient evaluation
+  num_workers: 32        # parallel workers for per-patient evaluation
+  parallel_backend: "loky"  # ["threading", "loky"] - loky better for SLURM, avoids GIL and memory fragmentation
   device: "cpu"         # reserved for future GPU-assisted ops
 
   # Metrics
   compute_lpips: false  # requires torch + lpips; optional
   ssim_axis: "axial"    # 'axial' | 'coronal' | 'sagittal' slice-wise averaging
-  evaluate_train: true  # compute metrics on train set (can disable for speed)
+  evaluate_train: false  # compute metrics on train set (can disable for speed)
   # Saving
   save_weight_volumes: true    # save per-expert tiled weight maps as compressed NPZ for inspection
   save_blends: true            # save blended predictions
@@ -56,7 +56,7 @@ pacs_sr:
   log_level: "INFO"            # logging level: DEBUG, INFO, WARNING, ERROR
   log_to_file: true            # save logs to file in output directory
   log_region_freq: 10          # log region optimization progress every N regions
-  disable_tqdm: false          # set to true for SLURM-friendly logging (no progress bars)
+  disable_tqdm: true           # set to true for SLURM-friendly logging (no progress bars)
   # Output directory
   out_root: /mnt/home/users/tic_163_uma/mpascual/fscratch/results/PACS_SR
 

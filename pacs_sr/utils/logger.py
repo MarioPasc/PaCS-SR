@@ -84,7 +84,7 @@ class PacsSRLogger:
             "Optimization": ["simplex", "lambda_ridge", "laplacian_tau"],
             "Edge Weighting": ["lambda_edge", "edge_power"],
             "Normalization": ["normalize"],
-            "Compute": ["num_workers", "device"],
+            "Compute": ["num_workers", "parallel_backend", "device"],
             "Metrics": ["compute_lpips", "ssim_axis"],
             "Saving": ["save_weight_volumes", "save_blends"],
             "Data": ["spacings", "pulses", "models"],
