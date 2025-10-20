@@ -20,7 +20,7 @@ registration:
 
 pacs_sr:
   # Experiment identity
-  experiment_name: "PaCS-SR_first_draft"
+  experiment_name: "PaCS_SR"
   disable_tqdm: false  
   # Tile geometry
   patch_size: 32        # p in {8,16,24,32}
@@ -57,9 +57,13 @@ pacs_sr:
   log_level: "INFO"            # logging level: DEBUG, INFO, WARNING, ERROR
   log_to_file: true            # save logs to file in output directory
   log_region_freq: 10          # log region optimization progress every N regions
-  disable_tqdm: false          # set to true for SLURM-friendly logging (no progress bars)
   # Output directory
   out_root: /media/mpascual/PortableSSD/Meningiomas/tasks/superresolution/results/PACS_SR
+
+visualizations:
+  results_root: /media/mpascual/PortableSSD/Meningiomas/tasks/superresolution/results/models/PaCS_SR
+  out_root: /media/mpascual/PortableSSD/Meningiomas/tasks/superresolution/results/figures/PaCS_SR
+  dpi: 200
 
 predict:
   pacs_sr_weights_path: "/path/to/saved/pacs_sr/weights.npy"

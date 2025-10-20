@@ -100,6 +100,17 @@ class FullConfig:
     registration: RegistrationConfig
     pacs_sr: PacsSRConfig
     predict: Optional[PredictConfig] = None
+    # Optional visualization block
+    visualizations: Optional["VisualizationsConfig"] = None
+
+
+@dataclass(frozen=True)
+class VisualizationsConfig:
+    """Configuration for visualization outputs and inputs."""
+    results_root: Path   # root where PaCS-SR wrote results (experiment directory lives here)
+    out_root: Path       # output directory for figures/reports
+    # Future extensions: figure dpi, slice selection policy, etc.
+    dpi: int = 200
 
 def load_data_config(config_dict: dict) -> DataConfig:
     """Parse the data section of the config."""
@@ -240,11 +251,22 @@ def load_full_config(path: Path) -> FullConfig:
     if "predict" in yaml_data:
         predict_config = load_predict_config(yaml_data["predict"])
 
+    # Optional visualizations section
+    viz_config = None
+    if "visualizations" in yaml_data:
+        v = yaml_data["visualizations"]
+        viz_config = VisualizationsConfig(
+            results_root=Path(v["results_root"]),
+            out_root=Path(v["out_root"]),
+            dpi=int(v.get("dpi", 200))
+        )
+
     return FullConfig(
         data=data_config,
         registration=registration_config,
         pacs_sr=pacs_sr_config,
-        predict=predict_config
+        predict=predict_config,
+        visualizations=viz_config
     )
 
 

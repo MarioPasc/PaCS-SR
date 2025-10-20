@@ -11,7 +11,7 @@
 #SBATCH -e %x-%A_%a.err
 
 # cd ~/fscratch/repos/PaCS-SR/; git pull; cd ~/execs/PACS_SR/; cp ~/fscratch/repos/PaCS-SR/scripts/picasso_job.sh .
-# sbatch --export=ALL,CONFIG_YAML=/mnt/home/users/tic_163_uma/mpascual/fscratch/repos/PaCS-SR/configs/picasso.yaml,CONDA_ENV=pacs,RESULTS_HOME=$HOME/execs/pacs-sr/results picasso_job.sh
+# sbatch --export=ALL,CONFIG_YAML=/mnt/home/users/tic_163_uma/mpascual/fscratch/repos/PaCS-SR/configs/picasso.yaml,CONDA_ENV=pacs,RESULTS_HOME=$HOME/execs/pacs-sr-stride/results picasso_job.sh
 
 
 set -euo pipefail

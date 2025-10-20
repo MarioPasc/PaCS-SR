@@ -47,9 +47,9 @@ def list_patients_with_complete_coverage(cfg: BuilderConfig) -> List[str]:
     Scan the filesystem and return patient IDs present with complete coverage:
     - For every model, spacing, pulse: SR output exists at
       {models_root}/{MODEL}/{spacing}/output_volumes/{patient}-{pulse}.nii.gz
-    - For LR: {lr_root}/{spacing}/{patient}/{patient}-{pulse}.nii.gz
     - For HR: {hr_root}/{patient}/{patient}-{pulse}.nii.gz
-    Patients missing any required file are excluded.
+    - For LR (optional): {lr_root}/{spacing}/{patient}/{patient}-{pulse}.nii.gz
+    Patients missing any required file (HR or SR) are excluded. LR is optional.
     """
     logging.info("Scanning filesystem to assemble candidate patients")
     # Candidate set: patients present in HR root
@@ -83,18 +83,16 @@ def list_patients_with_complete_coverage(cfg: BuilderConfig) -> List[str]:
         if not ok:
             drop.add(patient)
             continue
-        # LR per spacing and pulse
+        # LR per spacing and pulse (optional - log if missing but don't exclude)
+        has_lr = True
         for spacing in cfg.spacings:
             for pulse in cfg.pulses:
                 if not lr_path_ok(spacing, patient, pulse):
-                    ok = False
-                    logging.warning("Missing LR for %s %s %s", patient, spacing, pulse)
+                    has_lr = False
+                    logging.debug("Missing LR for %s %s %s (non-fatal)", patient, spacing, pulse)
                     break
-            if not ok:
+            if not has_lr:
                 break
-        if not ok:
-            drop.add(patient)
-            continue
         # SR per model, spacing, pulse
         for model in cfg.models:
             for spacing in cfg.spacings:
@@ -121,6 +119,7 @@ def list_patients_with_complete_coverage(cfg: BuilderConfig) -> List[str]:
 def make_patient_entry(cfg: BuilderConfig, patient: str) -> Dict:
     """
     Create the nested dict for one patient with the exact structure requested.
+    LR entries are only included if all required LR files exist.
     """
     entry: Dict[str, Dict] = {}
     # Per-model SR
@@ -134,16 +133,23 @@ def make_patient_entry(cfg: BuilderConfig, patient: str) -> Dict:
                 )
             model_block[spacing] = spacing_block
         entry[model] = model_block
-    # LR
+    # LR (optional - only include if all files exist)
     lr_block: Dict[str, Dict[str, str]] = {}
+    has_all_lr = True
     for spacing in cfg.spacings:
         spacing_block = {}
         for pulse in cfg.pulses:
-            spacing_block[pulse] = str(
-                cfg.lr_root / spacing / patient / f"{patient}-{pulse}.nii.gz"
-            )
+            lr_path = cfg.lr_root / spacing / patient / f"{patient}-{pulse}.nii.gz"
+            if lr_path.is_file():
+                spacing_block[pulse] = str(lr_path)
+            else:
+                has_all_lr = False
+                break
+        if not has_all_lr:
+            break
         lr_block[spacing] = spacing_block
-    entry["LR"] = lr_block
+    if has_all_lr:
+        entry["LR"] = lr_block
     # HR (duplicated under each spacing key for convenience)
     hr_block: Dict[str, Dict[str, str]] = {}
     for spacing in cfg.spacings:
