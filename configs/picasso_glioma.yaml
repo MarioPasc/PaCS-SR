@@ -1,0 +1,78 @@
+data:
+  models-root: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/meningiomas/glioma/models
+  hr-root: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/meningiomas/glioma/high_resolution
+  lr-root: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/meningiomas/glioma/low_res # No existe
+  spacings: [3mm, 5mm, 7mm]
+  pulses: [t1c, t1n, t2w, t2f]
+  models: [BSPLINE, ECLARE, SMORE]
+  kfolds: 5
+  seed: 42
+  out: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/meningiomas/glioma/kfolds_manifest.json
+
+registration:
+  atlas: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/meningiomas/atlas
+  t1: T1_brain.nii
+  t2: T2_brain.nii
+  epi: EPI_brain.nii
+  pd: PD_brain.nii
+  # To get the brain mask, just compute the largest connected component of the atlas T1 thresholded at 0.1. 
+  brain_mask: brain_mask.nii
+
+pacs_sr:
+  # Experiment identity
+  experiment_name: "PaCS-SR-Glioma"
+  # Tile geometry
+  patch_size: 32        # p in {8,16,24,32}
+  stride: 16            # use patch_size for non-overlap, or patch_size//2 for 50% overlap
+  mixing_window: "hann"  # ["flat","hann"] When stride < patch_size, we use overlap-add to blend overlapping patches
+
+  # Optimization
+  simplex: true         # enforce w >= 0 and sum(w)=1
+  lambda_ridge: 1.0e-4  # small ridge to condition the Q matrix per region
+  laplacian_tau: 0.10    # optional smoothing of regional weights across adjacency graph
+  # Edge-aware voxel reweighting for statistics accumulation
+  lambda_edge: 0.25      # 0 disables edge emphasis
+  edge_power: 2.0
+  lambda_grad: 0.2      # 0 disables
+  grad_operator: "sobel" # or "scharr"
+
+  # Normalization
+  normalize: "zscore"   # ['zscore'] for now
+  # Registration
+  use_registration: false  # enable atlas-based registration and brain masking
+  # I/O and compute
+  num_workers: 32        # parallel workers for per-patient evaluation
+  parallel_backend: "loky"  # ["threading", "loky"] - loky better for SLURM, avoids GIL and memory fragmentation
+  device: "cpu"         # reserved for future GPU-assisted ops
+
+  # Metrics
+  compute_lpips: false  # requires torch + lpips; optional
+  ssim_axis: "axial"    # 'axial' | 'coronal' | 'sagittal' slice-wise averaging
+  evaluate_train: false  # compute metrics on train set (can disable for speed)
+  # Saving
+  save_weight_volumes: true    # save per-expert tiled weight maps as compressed NPZ for inspection
+  save_blends: true            # save blended predictions
+  # Logging
+  log_level: "INFO"            # logging level: DEBUG, INFO, WARNING, ERROR
+  log_to_file: true            # save logs to file in output directory
+  log_region_freq: 10          # log region optimization progress every N regions
+  disable_tqdm: true           # set to true for SLURM-friendly logging (no progress bars)
+  # Output directory
+  out_root: /mnt/home/users/tic_163_uma/mpascual/fscratch/results/PACS_SR
+
+predict:
+  pacs_sr_weights_path: "/path/to/saved/pacs_sr/weights.npy"
+  experts:
+    expert1:
+      name: "BSPLINE"
+      opinion_path: "/path/to/expert1/predictions"
+    expert2:
+      name: "ECLARE"
+      opinion_path: "/path/to/expert2/predictions"
+    expert3:
+      name: "SMORE"
+      opinion_path: "/path/to/expert3/predictions"
+    expert4:
+      name: "UNIRES"
+      opinion_path: "/path/to/expert4/predictions"
+  out_root: "/path/to/pacs_sr/predictions/output"
