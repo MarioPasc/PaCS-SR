@@ -211,3 +211,186 @@ def register_and_mask(
     masked = apply_brain_mask(registered, pulse, atlas_dir, mask_cache)
 
     return masked, registered_affine
+
+
+def register_and_mask_from_files(
+    moving_path: Path,
+    atlas_path: Path,
+    mask_path: Path,
+    output_path: Path,
+    registration_type: str = 'Rigid',
+    verbose: bool = False
+) -> None:
+    """
+    CLI-friendly wrapper: register moving image to atlas and apply brain mask.
+
+    Args:
+        moving_path: Path to moving volume (.nii or .nii.gz)
+        atlas_path: Path to atlas template (.nii or .nii.gz)
+        mask_path: Path to brain mask (.nii or .nii.gz)
+        output_path: Path to save registered and masked volume
+        registration_type: Type of ANTs registration ('Rigid', 'Affine', 'SyN', etc.)
+        verbose: Enable verbose logging
+    """
+    if verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
+    else:
+        logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    logger.info(f"Loading moving image: {moving_path}")
+    moving = ants.image_read(str(moving_path))
+
+    logger.info(f"Loading atlas template: {atlas_path}")
+    fixed = ants.image_read(str(atlas_path))
+
+    logger.info(f"Loading brain mask: {mask_path}")
+    mask_img = ants.image_read(str(mask_path))
+    mask = mask_img.numpy() > 0
+
+    # Perform registration
+    logger.info(f"Performing {registration_type} registration...")
+    registration = ants.registration(
+        fixed=fixed,
+        moving=moving,
+        type_of_transform=registration_type,
+        verbose=verbose
+    )
+
+    # Get registered image
+    registered = registration['warpedmovout']
+    registered_volume = registered.numpy()
+
+    # Ensure mask matches registered volume shape
+    if mask.shape != registered_volume.shape:
+        logger.warning(
+            f"Mask shape {mask.shape} != registered volume shape {registered_volume.shape}. "
+            f"Resampling mask to match."
+        )
+        from scipy.ndimage import zoom
+        zoom_factors = [v / m for v, m in zip(registered_volume.shape, mask.shape)]
+        mask = zoom(mask.astype(float), zoom_factors, order=0) > 0.5
+
+    # Apply brain mask
+    logger.info("Applying brain mask...")
+    masked_volume = registered_volume.copy()
+    masked_volume[~mask] = 0
+
+    # Create output ANTs image with registered properties
+    output_img = ants.from_numpy(
+        masked_volume,
+        origin=registered.origin,
+        spacing=registered.spacing,
+        direction=registered.direction
+    )
+
+    # Save result
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Saving registered and masked volume to: {output_path}")
+    ants.image_write(output_img, str(output_path))
+    logger.info("✓ Done!")
+
+
+def main():
+    """CLI entry point for registration and brain masking."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Register a moving volume to an atlas template and apply brain mask",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Rigid registration (default, 6 DOF)
+  python -m pacs_sr.utils.registration \\
+      --moving patient_t1.nii.gz \\
+      --atlas atlas/T1_brain.nii \\
+      --mask atlas/brain_mask.nii \\
+      --output registered_patient_t1.nii.gz
+
+  # Affine registration (12 DOF)
+  python -m pacs_sr.utils.registration \\
+      --moving patient_t1.nii.gz \\
+      --atlas atlas/T1_brain.nii \\
+      --mask atlas/brain_mask.nii \\
+      --output registered_patient_t1.nii.gz \\
+      --type Affine
+
+  # Non-linear registration (deformable)
+  python -m pacs_sr.utils.registration \\
+      --moving patient_t1.nii.gz \\
+      --atlas atlas/T1_brain.nii \\
+      --mask atlas/brain_mask.nii \\
+      --output registered_patient_t1.nii.gz \\
+      --type SyN \\
+      --verbose
+"""
+    )
+    parser.add_argument(
+        "--moving",
+        type=Path,
+        required=True,
+        help="Path to moving volume (.nii or .nii.gz)"
+    )
+    parser.add_argument(
+        "--atlas",
+        type=Path,
+        required=True,
+        help="Path to atlas template (.nii or .nii.gz)"
+    )
+    parser.add_argument(
+        "--mask",
+        type=Path,
+        required=True,
+        help="Path to brain mask (.nii or .nii.gz)"
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help="Path to save registered and masked volume"
+    )
+    parser.add_argument(
+        "--type",
+        type=str,
+        default="Rigid",
+        choices=["Rigid", "Affine", "SyN", "SyNRA", "SyNOnly", "Translation"],
+        help="Registration type (default: Rigid)"
+    )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        help="Enable verbose logging"
+    )
+
+    args = parser.parse_args()
+
+    # Validate input files exist
+    for path, name in [
+        (args.moving, "Moving image"),
+        (args.atlas, "Atlas template"),
+        (args.mask, "Brain mask")
+    ]:
+        if not path.exists():
+            logger.error(f"{name} not found: {path}")
+            return 1
+
+    try:
+        register_and_mask_from_files(
+            moving_path=args.moving,
+            atlas_path=args.atlas,
+            mask_path=args.mask,
+            output_path=args.output,
+            registration_type=args.type,
+            verbose=args.verbose
+        )
+        return 0
+    except Exception as e:
+        logger.error(f"Registration failed: {e}")
+        if args.verbose:
+            import traceback
+            traceback.print_exc()
+        return 1
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

@@ -3,15 +3,15 @@
 #SBATCH -N 1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=16G
-#SBATCH --time=2-00:00:00
+#SBATCH --mem=8G
+#SBATCH --time=10:00:00
 #SBATCH --array=1-60
 #SBATCH --constraint=cal
 #SBATCH -o %x-%A_%a.out
 #SBATCH -e %x-%A_%a.err
 
 # cd ~/fscratch/repos/PaCS-SR/; git pull; cd ~/execs/PACS_SR/; cp ~/fscratch/repos/PaCS-SR/scripts/picasso_job.sh .
-# sbatch --export=ALL,CONFIG_YAML=/mnt/home/users/tic_163_uma/mpascual/fscratch/repos/PaCS-SR/configs/picasso.yaml,CONDA_ENV=pacs,RESULTS_HOME=$HOME/pacs-sr/results picasso_job.sh
+# sbatch --export=ALL,CONFIG_YAML=/mnt/home/users/tic_163_uma/mpascual/fscratch/repos/PaCS-SR/configs/picasso.yaml,CONDA_ENV=pacs,RESULTS_HOME=$HOME/execs/pacs-sr/results picasso_job.sh
 
 
 set -euo pipefail

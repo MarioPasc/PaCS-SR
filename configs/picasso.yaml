@@ -39,7 +39,7 @@ pacs_sr:
   # Normalization
   normalize: "zscore"   # ['zscore'] for now
   # Registration
-  use_registration: true  # enable atlas-based registration and brain masking
+  use_registration: false  # enable atlas-based registration and brain masking
   # I/O and compute
   num_workers: 32        # parallel workers for per-patient evaluation
   parallel_backend: "loky"  # ["threading", "loky"] - loky better for SLURM, avoids GIL and memory fragmentation

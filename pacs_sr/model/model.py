@@ -356,67 +356,54 @@ class PatchwiseConvexStacker:
         # Accumulate per-patient stats in parallel
         self.logger.info("Accumulating statistics from training patients...")
 
-        # Use tqdm only if not disabled
+        # Create parallel backend (works with or without tqdm)
+        backend = create_backend(
+            backend=self.cfg.parallel_backend,
+            n_jobs=self.cfg.num_workers,
+            verbose=0
+        )
+
+        # Prepare argument tuples for parallel processing
+        tasks = [(e, self.cfg.models, spacing, pulse, labels, self.cfg) for e in entries]
+
+        # Execute parallel processing with or without tqdm
         if self.cfg.disable_tqdm:
-            # SLURM-friendly logging: manual progress tracking
+            # SLURM-friendly: parallel processing with periodic logging
             import time
+            from joblib import delayed
+
+            self.logger.info(f"Processing {n_patients} patients in parallel (backend={self.cfg.parallel_backend}, workers={self.cfg.num_workers})...")
             patient_start_time = time.time()
-            stats_list = []
-            skipped_patients = []
-            for idx, e in enumerate(entries):
-                patient_iter_start = time.time()
-                try:
-                    result = _accumulate_region_stats_for_patient(e, self.cfg.models, spacing, pulse, labels, self.cfg)
-                    stats_list.append(result)
-                except EOFError as err:
-                    # Skip corrupted patient files
-                    patient_id = e.get("patient_id", f"patient_{idx}")
-                    skipped_patients.append(patient_id)
-                    self.logger.warning(f"  Skipping patient {patient_id}: Corrupted file detected - {err}")
-                    continue
-                patient_iter_time = time.time() - patient_iter_start
 
-                # Log every 5 patients or at the end
-                if (idx + 1) % 5 == 0 or idx == n_patients - 1:
-                    elapsed = time.time() - patient_start_time
-                    avg_time = elapsed / (idx + 1)
-                    eta = avg_time * (n_patients - idx - 1)
-                    self.logger.info(
-                        f"  Progress: {idx+1}/{n_patients} ({(idx+1)/n_patients*100:.1f}%) | "
-                        f"Last: {patient_iter_time:.1f}s | Avg: {avg_time:.1f}s/patient | "
-                        f"ETA: {eta/60:.1f}min"
-                    )
-
-            if skipped_patients:
-                self.logger.warning(f"Skipped {len(skipped_patients)} corrupted patient(s): {', '.join(skipped_patients)}")
-        else:
-            # Use parallel backend with tqdm progress bar
-            # Create backend with configured parallelization strategy
-            backend = create_backend(
-                backend=self.cfg.parallel_backend,
-                n_jobs=self.cfg.num_workers,
-                verbose=0  # tqdm handles progress display
-            )
-
-            # Prepare argument tuples for starmap
-            tasks = [(e, self.cfg.models, spacing, pulse, labels, self.cfg) for e in entries]
-
-            # Execute with context manager for automatic cleanup
             with backend.parallel_context() as parallel:
-                from joblib import delayed
+                stats_list_raw = parallel(
+                    delayed(_accumulate_region_stats_for_patient_safe)(*args)
+                    for args in tasks
+                )
+
+            elapsed = time.time() - patient_start_time
+            avg_time = elapsed / n_patients if n_patients > 0 else 0
+            self.logger.info(
+                f"Completed {n_patients} patients in {elapsed:.1f}s "
+                f"(avg: {avg_time:.2f}s/patient, throughput: {n_patients/(elapsed/60):.1f} patients/min)"
+            )
+        else:
+            # Interactive mode: parallel processing with tqdm progress bar
+            from joblib import delayed
+            with backend.parallel_context() as parallel:
                 stats_list_raw = parallel(
                     delayed(_accumulate_region_stats_for_patient_safe)(*args)
                     for args in tqdm(tasks, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
                 )
 
-            # Filter out None results (corrupted patients)
-            stats_list = [s for s in stats_list_raw if s is not None]
-            n_skipped = len(stats_list_raw) - len(stats_list)
-            if n_skipped > 0:
-                self.logger.warning(f"Skipped {n_skipped} corrupted patient(s) during parallel processing")
+        # Filter out None results (corrupted patients)
+        stats_list = [s for s in stats_list_raw if s is not None]
+        n_skipped = len(stats_list_raw) - len(stats_list)
+        if n_skipped > 0:
+            self.logger.warning(f"Skipped {n_skipped} corrupted patient(s) during parallel processing")
 
-            # Cleanup backend resources
-            backend.cleanup()
+        # Cleanup backend resources
+        backend.cleanup()
 
         region_ids, Qs, Bs, counts = _reduce_region_stats(stats_list, M)
 
