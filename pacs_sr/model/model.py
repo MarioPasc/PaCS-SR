@@ -641,7 +641,14 @@ class PatchwiseConvexStacker:
 
         # Step 2: apply brain mask to set out-of-brain voxels to 0 (fixes tiling artifacts)
         if self.cfg.use_registration and self.cfg.atlas_dir is not None:
+            # Use atlas-based brain mask (registered to atlas space)
             blended_native = apply_brain_mask(blended_native, pulse, self.cfg.atlas_dir, self.mask_cache_)
+        else:
+            # Without registration, compute brain mask from HR volume in native space
+            # This removes blending artifacts outside the brain region
+            from pacs_sr.utils.compute_brain_mask import largest_cc_mask
+            brain_mask = largest_cc_mask(hr, thr=0.1, connectivity=26)
+            blended_native = blended_native * brain_mask.astype(np.float32)
 
         # Create reference image with potentially updated affine
         ref_img = nib.Nifti1Image(blended_native, hr_affine, hr_img.header)

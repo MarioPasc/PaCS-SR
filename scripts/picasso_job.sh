@@ -2,8 +2,8 @@
 #SBATCH -J pacs-sr-array
 #SBATCH -N 1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=32
-#SBATCH --mem=128G
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=48G
 #SBATCH --time=10:00:00
 #SBATCH --array=1-60
 #SBATCH --constraint=cal

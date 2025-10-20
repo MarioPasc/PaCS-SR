@@ -22,7 +22,7 @@ pacs_sr:
   # Experiment identity
   experiment_name: "PaCS-SR_picasso_experiment"
   # Tile geometry
-  patch_size: 32        # p in {8,16,24,32}
+  patch_size: 16        # p in {8,16,24,32}
   stride: 16            # use patch_size for non-overlap, or patch_size//2 for 50% overlap
   mixing_window: "hann"  # ["flat","hann"] When stride < patch_size, we use overlap-add to blend overlapping patches
 
