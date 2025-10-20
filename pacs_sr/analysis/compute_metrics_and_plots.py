@@ -17,6 +17,7 @@ from typing import Iterable, Tuple, Optional, Dict, List
 import numpy as np
 import pandas as pd
 import nibabel as nib
+from scipy.ndimage import zoom
 from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
 import matplotlib
@@ -123,11 +124,48 @@ def safe_load_nii(path: Path) -> np.ndarray:
     return arr  # shape: (X, Y, Z) or similar
 
 
+def align_volumes_shape(pred_vol: np.ndarray, gt_vol: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Align prediction and ground truth volumes to the same shape using bicubic interpolation.
+    
+    If shapes differ, resizes the smaller volume to match the larger one using order=3 (bicubic).
+    
+    Args:
+        pred_vol: Prediction volume
+        gt_vol: Ground truth volume
+        
+    Returns:
+        Tuple of (pred_vol, gt_vol) with aligned shapes
+    """
+    if pred_vol.shape == gt_vol.shape:
+        return pred_vol, gt_vol
+    
+    # Determine target shape (max dimensions)
+    target_shape = tuple(max(p, g) for p, g in zip(pred_vol.shape, gt_vol.shape))
+    
+    # Resize prediction if needed
+    if pred_vol.shape != target_shape:
+        zoom_factors = tuple(t / p for t, p in zip(target_shape, pred_vol.shape))
+        logging.info("Resizing prediction from %s to %s using bicubic interpolation (zoom factors: %s)",
+                     pred_vol.shape, target_shape, zoom_factors)
+        pred_vol = zoom(pred_vol, zoom_factors, order=3, mode='nearest')
+    
+    # Resize ground truth if needed
+    if gt_vol.shape != target_shape:
+        zoom_factors = tuple(t / g for t, g in zip(target_shape, gt_vol.shape))
+        logging.info("Resizing ground truth from %s to %s using bicubic interpolation (zoom factors: %s)",
+                     gt_vol.shape, target_shape, zoom_factors)
+        gt_vol = zoom(gt_vol, zoom_factors, order=3, mode='nearest')
+    
+    return pred_vol, gt_vol
+
+
 def compute_psnr_ssim(
     pred_vol: np.ndarray, gt_vol: np.ndarray, ssim_win: int
 ) -> Tuple[float, float]:
+    # Align shapes if they differ
     if pred_vol.shape != gt_vol.shape:
-        raise DataMismatchError(f"Shape mismatch: pred {pred_vol.shape} vs gt {gt_vol.shape}")
+        pred_vol, gt_vol = align_volumes_shape(pred_vol, gt_vol)
 
     # PSNR over full 3D volume; assumes intensities in [0,1] if normalized
     data_range = float(np.max(gt_vol) - np.min(gt_vol)) or 1.0
