@@ -356,51 +356,122 @@ class PatchwiseConvexStacker:
         # Accumulate per-patient stats in parallel
         self.logger.info("Accumulating statistics from training patients...")
 
-        # Create parallel backend (works with or without tqdm)
+        # Memory-aware worker count: limit parallelism to avoid OOM
+        # Each patient loads ~4-5 volumes (HR + experts), each ~50-100 MB
+        # Estimate: 200-500 MB per worker. With 16GB, safe limit is ~8-12 workers
+        try:
+            import psutil
+            available_memory_gb = psutil.virtual_memory().available / (1024**3)
+            # Conservative estimate: 1 GB per worker (includes volume data + processing overhead)
+            memory_based_workers = max(1, int(available_memory_gb * 0.7))  # Use 70% of available memory
+        except ImportError:
+            # Fallback: conservative estimate if psutil not available
+            # Assume 16GB system, use 10GB safely (70% of typical allocation)
+            self.logger.warning("psutil not available, using conservative worker estimate")
+            memory_based_workers = 10  # Safe default for typical SLURM node
+
+        effective_workers = min(self.cfg.num_workers, memory_based_workers, n_patients)
+
+        if effective_workers < self.cfg.num_workers:
+            try:
+                mem_info = f"available memory: {available_memory_gb:.1f}GB"
+            except NameError:
+                mem_info = "using conservative estimate"
+            self.logger.warning(
+                f"Reducing workers from {self.cfg.num_workers} to {effective_workers} "
+                f"to avoid OOM ({mem_info})"
+            )
+
+        # Create parallel backend with memory-safe worker count
         backend = create_backend(
             backend=self.cfg.parallel_backend,
-            n_jobs=self.cfg.num_workers,
+            n_jobs=effective_workers,
             verbose=0
         )
 
         # Prepare argument tuples for parallel processing
         tasks = [(e, self.cfg.models, spacing, pulse, labels, self.cfg) for e in entries]
 
-        # Execute parallel processing with or without tqdm
-        if self.cfg.disable_tqdm:
-            # SLURM-friendly: parallel processing with periodic logging
-            import time
-            from joblib import delayed
+        # Execute with OOM protection: try parallel first, fallback to serial on OOM
+        try:
+            # Execute parallel processing with or without tqdm
+            if self.cfg.disable_tqdm:
+                # SLURM-friendly: parallel processing with periodic logging
+                import time
+                from joblib import delayed
 
-            self.logger.info(f"Processing {n_patients} patients in parallel (backend={self.cfg.parallel_backend}, workers={self.cfg.num_workers})...")
-            patient_start_time = time.time()
-
-            with backend.parallel_context() as parallel:
-                stats_list_raw = parallel(
-                    delayed(_accumulate_region_stats_for_patient_safe)(*args)
-                    for args in tasks
+                self.logger.info(
+                    f"Processing {n_patients} patients in parallel "
+                    f"(backend={self.cfg.parallel_backend}, workers={effective_workers})..."
                 )
+                patient_start_time = time.time()
+
+                # Use batch_size to limit memory: process in small batches
+                batch_size = max(1, effective_workers // 2)  # Conservative batching
+
+                with backend.parallel_context(batch_size=batch_size) as parallel:
+                    stats_list_raw = parallel(
+                        delayed(_accumulate_region_stats_for_patient_safe)(*args)
+                        for args in tasks
+                    )
+
+                elapsed = time.time() - patient_start_time
+                avg_time = elapsed / n_patients if n_patients > 0 else 0
+                self.logger.info(
+                    f"Completed {n_patients} patients in {elapsed:.1f}s "
+                    f"(avg: {avg_time:.2f}s/patient, throughput: {n_patients/(elapsed/60):.1f} patients/min)"
+                )
+            else:
+                # Interactive mode: parallel processing with tqdm progress bar
+                import time
+                from joblib import delayed
+
+                batch_size = max(1, effective_workers // 2)
+
+                with backend.parallel_context(batch_size=batch_size) as parallel:
+                    stats_list_raw = parallel(
+                        delayed(_accumulate_region_stats_for_patient_safe)(*args)
+                        for args in tqdm(tasks, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
+                    )
+
+        except (MemoryError, Exception) as e:
+            # Fallback to serial processing on OOM or other parallel execution errors
+            error_type = type(e).__name__
+            self.logger.warning(
+                f"Parallel processing failed ({error_type}). "
+                f"Falling back to serial processing to ensure completion..."
+            )
+
+            import time
+            patient_start_time = time.time()
+            stats_list_raw = []
+
+            for idx, args in enumerate(tasks):
+                try:
+                    result = _accumulate_region_stats_for_patient_safe(*args)
+                    stats_list_raw.append(result)
+
+                    # Log progress periodically
+                    if self.cfg.disable_tqdm and ((idx + 1) % 5 == 0 or idx == n_patients - 1):
+                        elapsed = time.time() - patient_start_time
+                        avg_time = elapsed / (idx + 1)
+                        eta = avg_time * (n_patients - idx - 1)
+                        self.logger.info(
+                            f"  Serial progress: {idx+1}/{n_patients} ({(idx+1)/n_patients*100:.1f}%) | "
+                            f"Avg: {avg_time:.1f}s/patient | ETA: {eta/60:.1f}min"
+                        )
+                except Exception as patient_err:
+                    self.logger.error(f"Failed to process patient {idx}: {patient_err}")
+                    stats_list_raw.append(None)
 
             elapsed = time.time() - patient_start_time
-            avg_time = elapsed / n_patients if n_patients > 0 else 0
-            self.logger.info(
-                f"Completed {n_patients} patients in {elapsed:.1f}s "
-                f"(avg: {avg_time:.2f}s/patient, throughput: {n_patients/(elapsed/60):.1f} patients/min)"
-            )
-        else:
-            # Interactive mode: parallel processing with tqdm progress bar
-            from joblib import delayed
-            with backend.parallel_context() as parallel:
-                stats_list_raw = parallel(
-                    delayed(_accumulate_region_stats_for_patient_safe)(*args)
-                    for args in tqdm(tasks, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
-                )
+            self.logger.info(f"Serial processing completed in {elapsed:.1f}s")
 
         # Filter out None results (corrupted patients)
         stats_list = [s for s in stats_list_raw if s is not None]
         n_skipped = len(stats_list_raw) - len(stats_list)
         if n_skipped > 0:
-            self.logger.warning(f"Skipped {n_skipped} corrupted patient(s) during parallel processing")
+            self.logger.warning(f"Skipped {n_skipped} corrupted patient(s) during processing")
 
         # Cleanup backend resources
         backend.cleanup()

@@ -3,7 +3,7 @@
 #SBATCH -N 1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=8G
+#SBATCH --mem=32G
 #SBATCH --time=10:00:00
 #SBATCH --array=1-60
 #SBATCH --constraint=cal
