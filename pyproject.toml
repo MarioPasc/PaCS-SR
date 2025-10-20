@@ -25,16 +25,20 @@ dependencies = [
   "tqdm>=4.65",
   "antspyx>=0.3.8",
   "psutil>=5.9",
+  "pandas>=1.5",
+  "pydantic>=2.0",
 ]
 
 [project.optional-dependencies]
 torch = ["torch>=2.1", "lpips>=0.1.4", "torchvision>=0.16"]
+viz = ["matplotlib>=3.6", "statsmodels>=0.14"]
 dev = ["ruff", "mypy", "pytest"]
 
 [project.scripts]
 pacs-sr-build-manifest = "pacs_sr.cli.build_manifest:main"
 pacs-sr-train = "pacs_sr.cli.train:main"
 pacs-sr-predict = "pacs_sr.cli.predict:main"
+pacs-sr-analyze-metrics = "pacs_sr.cli.analyze_metrics:main"
 
 [tool.setuptools]
-packages = ["pacs_sr", "pacs_sr.config", "pacs_sr.model", "pacs_sr.utils", "pacs_sr.data", "pacs_sr.cli"]
+packages = ["pacs_sr", "pacs_sr.config", "pacs_sr.model", "pacs_sr.utils", "pacs_sr.data", "pacs_sr.cli", "pacs_sr.analysis"]
