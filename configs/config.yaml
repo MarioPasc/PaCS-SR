@@ -65,6 +65,64 @@ visualizations:
   out_root: /media/mpascual/PortableSSD/Meningiomas/tasks/superresolution/results/figures/PaCS_SR
   dpi: 200
 
+analysis:
+  data:
+    gt_dir: "/media/hddb/mario/data/glioma/high_resolution"              # Directory with GT volumes
+    pred_dirs:                                   # Map of method name → directory with predictions
+      SMORE: "/media/hddb/mario/results/models/SMORE"
+      ECLARE: "/media/hddb/mario/results/models/ECLARE"
+      BSPLINE: "/media/hddb/mario/results/models/BSPLINE"
+      PACS_SR: "/media/hddb/mario/results/models/PACS_SR"
+    mask_dir: null                               # Optional ROI masks dir; same filenames as GT
+    file_ext: ".nii.gz"                          # One of [".nii.gz", ".nii", ".npy", ".npz"]
+    sequences: ["T1C","T2W","T2F"]         # Used if filenames encode sequence
+    cases_list: null                              # Optional txt/csv with case IDs (one per line)
+    filename_pattern: "{case}_{seq}"             # Template to form basename (no extension)
+    allow_missing: false                          # Skip pairs with any missing file if true
+    dtype: "float32"                              # Array dtype after load
+    norm:
+      kind: "none"                                # ["none","zscore","minmax"]
+      clip: null                                  # e.g., [0.0, 1.0]
+  metrics:
+    compute: ["psnr","ssim"]   # Subset of supported metrics
+    crop_border: 0                                # Voxels to crop from all sides before metrics
+    ssim:
+      win_size: 7
+      gaussian_weights: true
+      sigma: 1.5
+      use_sample_covariance: false
+      data_range: "auto"                          # "auto" or numeric
+    psnr:
+      data_range: "auto"                          # "auto" or numeric
+  stats:
+    paired: true
+    alpha: 0.05
+    multiple_comparison: "fdr_bh"                 # Benjamini–Hochberg
+    tests: ["ttest_paired","wilcoxon"]
+    effect_sizes: ["cohens_dz","cliffs_delta"]
+    bootstrap:
+      enabled: true
+      n_resamples: 5000
+      ci: 0.95
+    group_by: ["seq"]                             # Aggregate per sequence; options: ["seq"]
+    compare_methods:                              # List pairs to compare; if null, all pairwise
+      - ["SMORE","PACS_SR"]
+      - ["ECLARE","PACS_SR"]
+      - ["BSPLINE","PACS_SR"]
+  io:
+    output_dir: "results/analysis"
+    write_csv: true
+    write_json: true
+    save_plots: false                             # Plots skipped unless you enable and add deps
+    overwrite: true
+  runtime:
+    seed: 1337
+    num_workers: 8                                # CPU processes
+    chunk_voxels: 20000000                        # Process arrays in chunks to bound memory
+    progress: true
+    fail_fast: false
+
+
 predict:
   pacs_sr_weights_path: "/path/to/saved/pacs_sr/weights.npy"
   experts:

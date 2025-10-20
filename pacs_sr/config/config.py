@@ -1,8 +1,218 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple, Dict, Optional
+from typing import Dict, List, Literal, Optional, Tuple, Union
 import yaml
+from pydantic import BaseModel, Field, field_validator, ValidationError
+
+# -----------------------------
+# Dataclass containers (lightweight, used at runtime)
+# -----------------------------
+
+@dataclass(frozen=True)
+class NormConfig:
+    kind: Literal["none", "zscore", "minmax"] = "none"
+    clip: Optional[Tuple[float, float]] = None
+
+@dataclass(frozen=True)
+class SSIMConfig:
+    win_size: int = 7
+    gaussian_weights: bool = True
+    sigma: float = 1.5
+    use_sample_covariance: bool = False
+    data_range: Union[Literal["auto"], float] = "auto"
+
+@dataclass(frozen=True)
+class PSNRConfig:
+    data_range: Union[Literal["auto"], float] = "auto"
+
+@dataclass(frozen=True)
+class MetricsConfig:
+    compute: Tuple[str, ...] = ("psnr", "ssim", "mae", "rmse", "ncc")
+    crop_border: int = 0
+    ssim: SSIMConfig = SSIMConfig()
+    psnr: PSNRConfig = PSNRConfig()
+
+@dataclass(frozen=True)
+class AnalysisDataConfig:
+    gt_dir: Path = Path("/")
+    pred_dirs: Dict[str, Path] = field(default_factory=dict)
+    mask_dir: Optional[Path] = None
+    file_ext: Literal[".nii.gz", ".nii", ".npy", ".npz"] = ".nii.gz"
+    sequences: Tuple[str, ...] = ("T1C", "T1N", "T2W", "T2F")
+    cases_list: Optional[Path] = None
+    filename_pattern: str = "{case}_{seq}"
+    allow_missing: bool = False
+    dtype: Literal["float32", "float64"] = "float32"
+    norm: NormConfig = NormConfig()
+
+@dataclass(frozen=True)
+class BootstrapConfig:
+    enabled: bool = True
+    n_resamples: int = 5000
+    ci: float = 0.95
+
+@dataclass(frozen=True)
+class StatsConfig:
+    paired: bool = True
+    alpha: float = 0.05
+    multiple_comparison: Literal["none", "bonferroni", "fdr_bh"] = "fdr_bh"
+    tests: Tuple[Literal["ttest_paired", "wilcoxon"], ...] = ("ttest_paired", "wilcoxon")
+    effect_sizes: Tuple[Literal["cohens_dz", "cliffs_delta"], ...] = ("cohens_dz", "cliffs_delta")
+    bootstrap: BootstrapConfig = BootstrapConfig()
+    group_by: Tuple[Literal["seq"], ...] = ("seq",)
+    compare_methods: Optional[Tuple[Tuple[str, str], ...]] = None
+
+@dataclass(frozen=True)
+class IOConfig:
+    output_dir: Path = Path("results/analysis")
+    write_csv: bool = True
+    write_json: bool = True
+    save_plots: bool = False
+    overwrite: bool = True
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    seed: int = 1337
+    num_workers: int = 8
+    chunk_voxels: int = 20_000_000
+    progress: bool = True
+    fail_fast: bool = False
+
+@dataclass(frozen=True)
+class AnalysisConfig:
+    data: AnalysisDataConfig
+    metrics: MetricsConfig
+    stats: StatsConfig
+    io: IOConfig
+    runtime: RuntimeConfig
+
+# -----------------------------
+# Pydantic validators (strict parsing)
+# -----------------------------
+
+class _NormModel(BaseModel):
+    kind: Literal["none", "zscore", "minmax"] = "none"
+    clip: Optional[Tuple[float, float]] = None
+
+class _SSIMModel(BaseModel):
+    win_size: int = 7
+    gaussian_weights: bool = True
+    sigma: float = 1.5
+    use_sample_covariance: bool = False
+    data_range: Union[Literal["auto"], float] = "auto"
+
+class _PSNRModel(BaseModel):
+    data_range: Union[Literal["auto"], float] = "auto"
+
+class _MetricsModel(BaseModel):
+    compute: List[str] = Field(default_factory=lambda: ["psnr", "ssim", "mae", "rmse", "ncc"])
+    crop_border: int = 0
+    ssim: _SSIMModel = _SSIMModel()
+    psnr: _PSNRModel = _PSNRModel()
+
+class _DataModel(BaseModel):
+    gt_dir: Path
+    pred_dirs: Dict[str, Path]
+    mask_dir: Optional[Path] = None
+    file_ext: Literal[".nii.gz", ".nii", ".npy", ".npz"] = ".nii.gz"
+    sequences: List[str] = Field(default_factory=lambda: ["T1C", "T1N", "T2W", "T2F"])
+    cases_list: Optional[Path] = None
+    filename_pattern: str = "{case}_{seq}"
+    allow_missing: bool = False
+    dtype: Literal["float32", "float64"] = "float32"
+    norm: _NormModel = _NormModel()
+
+    @field_validator("gt_dir", "mask_dir", mode='before')
+    @classmethod
+    def _expand_dirs(cls, v):
+        return Path(v).expanduser().resolve() if v is not None else None
+
+    @field_validator("pred_dirs", mode='before')
+    @classmethod
+    def _expand_pred_dirs(cls, v):
+        return {k: Path(p).expanduser().resolve() for k, p in v.items()}
+
+class _BootstrapModel(BaseModel):
+    enabled: bool = True
+    n_resamples: int = 5000
+    ci: float = 0.95
+
+class _StatsModel(BaseModel):
+    paired: bool = True
+    alpha: float = 0.05
+    multiple_comparison: Literal["none", "bonferroni", "fdr_bh"] = "fdr_bh"
+    tests: List[Literal["ttest_paired", "wilcoxon"]] = Field(default_factory=lambda: ["ttest_paired","wilcoxon"])
+    effect_sizes: List[Literal["cohens_dz","cliffs_delta"]] = Field(default_factory=lambda: ["cohens_dz","cliffs_delta"])
+    bootstrap: _BootstrapModel = _BootstrapModel()
+    group_by: List[Literal["seq"]] = Field(default_factory=lambda: ["seq"])
+    compare_methods: Optional[List[Tuple[str, str]]] = None
+
+class _IOModel(BaseModel):
+    output_dir: Path = Path("results/analysis")
+    write_csv: bool = True
+    write_json: bool = True
+    save_plots: bool = False
+    overwrite: bool = True
+
+    @field_validator("output_dir", mode='before')
+    @classmethod
+    def _expand_out(cls, v):
+        return Path(v).expanduser().resolve()
+
+class _RuntimeModel(BaseModel):
+    seed: int = 1337
+    num_workers: int = 8
+    chunk_voxels: int = 20_000_000
+    progress: bool = True
+    fail_fast: bool = False
+
+class _AnalysisModel(BaseModel):
+    data: _DataModel
+    metrics: _MetricsModel = _MetricsModel()
+    stats: _StatsModel = _StatsModel()
+    io: _IOModel = _IOModel()
+    runtime: _RuntimeModel = _RuntimeModel()
+
+# -----------------------------
+# Public API
+# -----------------------------
+
+def parse_analysis_config(yaml_path: str | Path) -> AnalysisConfig:
+    """
+    Parse and validate the `analysis:` section into an AnalysisConfig instance.
+    """
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        cfg = yaml.safe_load(f) or {}
+    if "analysis" not in cfg:
+        raise ValueError("YAML missing top-level 'analysis' key.")
+    try:
+        model = _AnalysisModel(**cfg["analysis"])
+    except ValidationError as e:
+        raise ValueError(f"Invalid analysis configuration: {e}") from e
+
+    d = model.dict()
+    return AnalysisConfig(
+        data=AnalysisDataConfig(**d["data"]),
+        metrics=MetricsConfig(
+            compute=tuple(d["metrics"]["compute"]),
+            crop_border=d["metrics"]["crop_border"],
+            ssim=SSIMConfig(**d["metrics"]["ssim"]),
+            psnr=PSNRConfig(**d["metrics"]["psnr"]),
+        ),
+        stats=StatsConfig(
+            paired=d["stats"]["paired"],
+            alpha=d["stats"]["alpha"],
+            multiple_comparison=d["stats"]["multiple_comparison"],
+            tests=tuple(d["stats"]["tests"]),
+            effect_sizes=tuple(d["stats"]["effect_sizes"]),
+            bootstrap=BootstrapConfig(**d["stats"]["bootstrap"]),
+            group_by=tuple(d["stats"]["group_by"]),
+            compare_methods=tuple(map(tuple, d["stats"]["compare_methods"])) if d["stats"]["compare_methods"] else None,
+        ),
+        io=IOConfig(**d["io"]),
+        runtime=RuntimeConfig(**d["runtime"]),
+    )
 
 
 @dataclass(frozen=True)
