@@ -357,18 +357,61 @@ class PatchwiseConvexStacker:
         self.logger.info("Accumulating statistics from training patients...")
 
         # Memory-aware worker count: limit parallelism to avoid OOM
-        # Each patient loads ~4-5 volumes (HR + experts), each ~50-100 MB
-        # Estimate: 200-500 MB per worker. With 16GB, safe limit is ~8-12 workers
+        #
+        # Memory requirements per worker (empirically measured):
+        # - Python interpreter + libraries: ~250 MB
+        # - Volume data (HR + 4 experts @ ~100MB each): ~500 MB
+        # - ANTs registration temp data (if enabled): +1-2 GB
+        # - Processing buffers (gradients, statistics): ~300 MB
+        # - Safety margin for peaks: +200 MB
+        #
+        # Total per worker:
+        # - Without registration: ~1.25 GB
+        # - With registration: ~2.5-3 GB
+        #
+        # SLURM allocation: 16 GB, but ~1-2 GB used by system/base process
+        # Safe usable: ~14 GB
+
         try:
             import psutil
-            available_memory_gb = psutil.virtual_memory().available / (1024**3)
-            # Conservative estimate: 1 GB per worker (includes volume data + processing overhead)
-            memory_based_workers = max(1, int(available_memory_gb * 0.7))  # Use 70% of available memory
+            # Get available memory at this moment
+            mem = psutil.virtual_memory()
+            available_memory_gb = mem.available / (1024**3)
+            total_memory_gb = mem.total / (1024**3)
+
+            # Estimate memory per worker based on whether registration is enabled
+            if self.cfg.use_registration and self.cfg.atlas_dir is not None:
+                gb_per_worker = 2.5  # ANTs registration is memory-intensive
+                self.logger.info("ANTs registration enabled - using conservative memory estimate (2.5 GB/worker)")
+            else:
+                gb_per_worker = 1.5  # More conservative than 1 GB to account for overhead
+
+            # Use only 50% of available memory (very conservative) to leave headroom
+            usable_memory_gb = available_memory_gb * 0.5
+            memory_based_workers = max(1, int(usable_memory_gb / gb_per_worker))
+
+            self.logger.info(
+                f"Memory info: {available_memory_gb:.1f} GB available / {total_memory_gb:.1f} GB total, "
+                f"using {usable_memory_gb:.1f} GB for workers ({gb_per_worker} GB/worker)"
+            )
+
         except ImportError:
-            # Fallback: conservative estimate if psutil not available
-            # Assume 16GB system, use 10GB safely (70% of typical allocation)
+            # Fallback: very conservative estimate if psutil not available
             self.logger.warning("psutil not available, using conservative worker estimate")
-            memory_based_workers = 10  # Safe default for typical SLURM node
+            if self.cfg.use_registration and self.cfg.atlas_dir is not None:
+                memory_based_workers = 4  # Very safe for registration
+            else:
+                memory_based_workers = 8  # Safe default without registration
+
+        # Allow manual override via environment variable for debugging/tuning
+        import os
+        if "PACS_SR_MAX_WORKERS" in os.environ:
+            try:
+                manual_max_workers = int(os.environ["PACS_SR_MAX_WORKERS"])
+                memory_based_workers = min(memory_based_workers, manual_max_workers)
+                self.logger.info(f"Manual worker limit applied: PACS_SR_MAX_WORKERS={manual_max_workers}")
+            except ValueError:
+                pass
 
         effective_workers = min(self.cfg.num_workers, memory_based_workers, n_patients)
 
@@ -406,10 +449,9 @@ class PatchwiseConvexStacker:
                 )
                 patient_start_time = time.time()
 
-                # Use batch_size to limit memory: process in small batches
-                batch_size = max(1, effective_workers // 2)  # Conservative batching
-
-                with backend.parallel_context(batch_size=batch_size) as parallel:
+                # Use 'auto' batch_size - joblib will adapt based on task completion time
+                # This prevents pre-loading too many tasks and causing memory spikes
+                with backend.parallel_context(batch_size='auto') as parallel:
                     stats_list_raw = parallel(
                         delayed(_accumulate_region_stats_for_patient_safe)(*args)
                         for args in tasks
@@ -426,9 +468,7 @@ class PatchwiseConvexStacker:
                 import time
                 from joblib import delayed
 
-                batch_size = max(1, effective_workers // 2)
-
-                with backend.parallel_context(batch_size=batch_size) as parallel:
+                with backend.parallel_context(batch_size='auto') as parallel:
                     stats_list_raw = parallel(
                         delayed(_accumulate_region_stats_for_patient_safe)(*args)
                         for args in tqdm(tasks, desc=f"Processing patients ({spacing}, {pulse})", unit="patient")
@@ -437,8 +477,22 @@ class PatchwiseConvexStacker:
         except (MemoryError, Exception) as e:
             # Fallback to serial processing on OOM or other parallel execution errors
             error_type = type(e).__name__
+            error_msg = str(e)
+
+            # Provide detailed diagnostics
+            try:
+                import psutil
+                mem = psutil.virtual_memory()
+                mem_diag = (
+                    f"Memory at failure: {mem.used / (1024**3):.1f}GB used / "
+                    f"{mem.total / (1024**3):.1f}GB total ({mem.percent:.1f}% utilization)"
+                )
+            except:
+                mem_diag = "Memory diagnostics unavailable"
+
             self.logger.warning(
-                f"Parallel processing failed ({error_type}). "
+                f"Parallel processing failed ({error_type}). {mem_diag}\n"
+                f"Error details: {error_msg[:200]}\n"
                 f"Falling back to serial processing to ensure completion..."
             )
 
