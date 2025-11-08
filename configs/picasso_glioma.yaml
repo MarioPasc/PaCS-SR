@@ -3,7 +3,7 @@ data:
   hr-root: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/meningiomas/glioma/high_resolution
   lr-root: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/meningiomas/glioma/low_res # No existe
   spacings: [3mm, 5mm, 7mm]
-  pulses: [t1c, t2w, t2f]
+  pulses: [t1c, t1n, t2w, t2f]
   models: [BSPLINE, ECLARE, SMORE]
   kfolds: 5
   seed: 42
