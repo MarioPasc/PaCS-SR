@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-# compute_metrics_and_plots.py
-# Author: Mario's analysis pipeline helper
-# Python >=3.10
 
 from __future__ import annotations
 import argparse
