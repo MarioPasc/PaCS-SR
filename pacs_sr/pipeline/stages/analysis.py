@@ -72,6 +72,12 @@ class AnalysisStage(PipelineStage):
         if stats:
             self._save_statistical_tests(context, stats)
 
+        # Run regional specialization analysis (for explainability)
+        self.log(context, "Running regional specialization analysis...")
+        regional_results = self._run_regional_analysis(context)
+        if regional_results:
+            self._save_regional_analysis(context, regional_results)
+
         self.log(context, "Analysis stage completed successfully")
         return StageResult.ok("Analysis completed", data={"aggregated": aggregated})
 
@@ -385,3 +391,94 @@ class AnalysisStage(PipelineStage):
         with open(path, "w") as f:
             json.dump(stats, f, indent=2)
         self.log(context, f"Saved statistical tests: {path}")
+
+    def _run_regional_analysis(
+        self,
+        context: "PipelineContext",
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Run regional specialization analysis for explainability.
+
+        This is key for the medical congress: it shows which SR experts
+        excel in which brain regions, providing interpretable insights.
+        """
+        try:
+            from pacs_sr.experiments.regional_specialization import (
+                load_weight_maps,
+                analyze_regional_weights,
+                compute_specialization_index,
+            )
+        except ImportError:
+            self.log(context, "Regional specialization module not available", "warning")
+            return None
+
+        # Find all weight NPZ files
+        weight_files = list(context.training_dir.rglob("*_weights_*.npz"))
+
+        if not weight_files:
+            self.log(context, "No weight files found for regional analysis", "warning")
+            return None
+
+        self.log(context, f"Analyzing {len(weight_files)} weight files...")
+
+        all_specialization = []
+        global_stats_by_model = {}
+        model_names = list(context.config.pacs_sr.models)
+
+        for wf in weight_files:
+            try:
+                weight_maps, names, metadata = load_weight_maps(wf)
+                results = analyze_regional_weights(weight_maps, names)
+                all_specialization.append(results["specialization_index"])
+
+                # Aggregate global stats
+                for model, stats in results["global_stats"].items():
+                    if model not in global_stats_by_model:
+                        global_stats_by_model[model] = {"means": [], "stds": []}
+                    global_stats_by_model[model]["means"].append(stats["mean"])
+                    global_stats_by_model[model]["stds"].append(stats["std"])
+
+            except Exception as e:
+                self.log(context, f"Error processing {wf}: {e}", "warning")
+                continue
+
+        if not all_specialization:
+            return None
+
+        # Compute aggregated results
+        results = {
+            "n_files_analyzed": len(all_specialization),
+            "specialization_index": {
+                "mean": float(np.mean(all_specialization)),
+                "std": float(np.std(all_specialization)),
+                "min": float(np.min(all_specialization)),
+                "max": float(np.max(all_specialization)),
+            },
+            "model_weights": {},
+        }
+
+        # Per-model weight statistics
+        for model, stats in global_stats_by_model.items():
+            results["model_weights"][model] = {
+                "mean_weight": float(np.mean(stats["means"])),
+                "std_weight": float(np.mean(stats["stds"])),
+            }
+
+        self.log(
+            context,
+            f"Regional analysis: Specialization Index = {results['specialization_index']['mean']:.3f} ± "
+            f"{results['specialization_index']['std']:.3f}"
+        )
+
+        return results
+
+    def _save_regional_analysis(
+        self,
+        context: "PipelineContext",
+        results: Dict[str, Any],
+    ) -> None:
+        """Save regional specialization analysis results."""
+        path = context.analysis_dir / "regional_specialization.json"
+        with open(path, "w") as f:
+            json.dump(results, f, indent=2)
+        self.log(context, f"Saved regional analysis: {path}")

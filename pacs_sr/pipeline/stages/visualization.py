@@ -92,6 +92,11 @@ class VisualizationStage(PipelineStage):
         fold_paths = self._generate_fold_comparison(context, aggregated, fig_config)
         generated.extend(fold_paths)
 
+        # 5. Specialization analysis figures (for medical congress explainability)
+        self.log(context, "Generating specialization analysis figures...")
+        spec_paths = self._generate_specialization_figures(context, fig_config)
+        generated.extend(spec_paths)
+
         self.log(context, f"Visualization complete: {len(generated)} figures generated")
         return StageResult.ok(
             f"Generated {len(generated)} figures",
@@ -412,6 +417,108 @@ class VisualizationStage(PipelineStage):
         if saved_path:
             saved_paths.append(saved_path)
         plt.close(fig)
+
+        return saved_paths
+
+    def _generate_specialization_figures(
+        self,
+        context: "PipelineContext",
+        fig_config: Dict[str, Any],
+    ) -> List[Path]:
+        """
+        Generate figures for regional specialization analysis.
+
+        These figures are critical for the medical congress to demonstrate
+        that PaCS-SR provides interpretable, region-specific expert selection.
+        """
+        import matplotlib.pyplot as plt
+
+        saved_paths = []
+
+        # Load regional analysis results if available
+        regional_path = context.analysis_dir / "regional_specialization.json"
+        if not regional_path.exists():
+            self.log(context, "No regional specialization data found", "warning")
+            return saved_paths
+
+        with open(regional_path, "r") as f:
+            regional = json.load(f)
+
+        # 1. Expert weight bar chart
+        model_weights = regional.get("model_weights", {})
+        if model_weights:
+            fig, ax = plt.subplots(figsize=(10, 6))
+
+            models = list(model_weights.keys())
+            means = [model_weights[m]["mean_weight"] for m in models]
+            stds = [model_weights[m]["std_weight"] for m in models]
+
+            colors = plt.cm.Set3(np.linspace(0, 1, len(models)))
+            bars = ax.bar(range(len(models)), means, yerr=stds, capsize=5,
+                          color=colors, edgecolor="black", alpha=0.8)
+
+            ax.set_xticks(range(len(models)))
+            ax.set_xticklabels(models, rotation=45, ha="right", fontsize=12)
+            ax.set_ylabel("Mean Weight", fontsize=12)
+            ax.set_xlabel("Expert Model", fontsize=12)
+            ax.set_title("Average Expert Model Contributions\n(PaCS-SR Explainability)",
+                         fontsize=14, fontweight="bold")
+            ax.grid(True, alpha=0.3, axis="y")
+
+            # Add value labels on bars
+            for bar, mean in zip(bars, means):
+                ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.01,
+                        f"{mean:.3f}", ha="center", va="bottom", fontsize=10)
+
+            plt.tight_layout()
+
+            base_path = context.figures_dir / "weights" / "expert_contributions"
+            saved_path = self._save_figure(fig, base_path, fig_config)
+            if saved_path:
+                saved_paths.append(saved_path)
+            plt.close(fig)
+
+        # 2. Specialization index visualization
+        spec_index = regional.get("specialization_index", {})
+        if spec_index:
+            fig, ax = plt.subplots(figsize=(8, 4))
+
+            # Create a gauge-like visualization
+            mean_si = spec_index.get("mean", 0)
+            std_si = spec_index.get("std", 0)
+
+            # Draw background arc
+            theta = np.linspace(0, np.pi, 100)
+            ax.plot(np.cos(theta), np.sin(theta), 'lightgray', linewidth=20, solid_capstyle='round')
+
+            # Draw filled portion based on specialization index
+            theta_fill = np.linspace(0, np.pi * mean_si, 100)
+            ax.plot(np.cos(theta_fill), np.sin(theta_fill), 'forestgreen', linewidth=20, solid_capstyle='round')
+
+            # Add text
+            ax.text(0, 0.3, f"{mean_si:.2f}", ha="center", va="center", fontsize=36, fontweight="bold")
+            ax.text(0, -0.1, f"± {std_si:.3f}", ha="center", va="center", fontsize=14, color="gray")
+            ax.text(0, -0.4, "Specialization Index", ha="center", va="center", fontsize=14)
+
+            # Scale labels
+            ax.text(-1.1, 0, "0", ha="center", va="center", fontsize=12)
+            ax.text(1.1, 0, "1", ha="center", va="center", fontsize=12)
+
+            ax.set_xlim(-1.5, 1.5)
+            ax.set_ylim(-0.6, 1.2)
+            ax.set_aspect("equal")
+            ax.axis("off")
+
+            ax.set_title("PaCS-SR Specialization Index\n(Higher = More Region-Specific Expert Selection)",
+                         fontsize=12, fontweight="bold", pad=10)
+
+            plt.tight_layout()
+
+            base_path = context.figures_dir / "weights" / "specialization_index"
+            saved_path = self._save_figure(fig, base_path, fig_config)
+            if saved_path:
+                saved_paths.append(saved_path)
+            plt.close(fig)
 
         return saved_paths
 

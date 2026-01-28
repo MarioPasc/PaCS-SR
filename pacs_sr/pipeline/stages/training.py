@@ -193,26 +193,29 @@ class TrainingStage(PipelineStage):
             # Parallel processing
             num_workers=config.num_workers,
             parallel_backend=config.parallel_backend,
+            device=config.device,
 
             # Registration
             use_registration=config.use_registration,
             atlas_dir=context.config.registration.atlas if context.config.registration else None,
 
-            # Output settings
+            # Metrics computation
+            compute_lpips=config.compute_lpips,
+            compute_kid=config.compute_kid,
+            ssim_axis=config.ssim_axis,
+            evaluate_train=config.evaluate_train,
+
+            # Output settings - structure: {training_dir}/{spacing}/model_data/fold_{N}/{pulse}/
             out_root=str(task_out_root),
-            experiment_name=f"fold_{fold}",
+            experiment_name="",  # Empty to avoid extra directory nesting
             save_blends=config.save_blends,
             save_weight_volumes=config.save_weight_volumes,
-            evaluate_train=config.evaluate_train,
 
             # Logging
             log_level=config.log_level,
             log_to_file=config.log_to_file,
             log_region_freq=config.log_region_freq,
             disable_tqdm=config.disable_tqdm,
-
-            # SSIM configuration
-            ssim_axis=config.ssim_axis,
 
             # Spacings and pulses (for reference)
             spacings=config.spacings,
