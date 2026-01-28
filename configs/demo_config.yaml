@@ -1,0 +1,146 @@
+# ==============================================================================
+# PaCS-SR Demo Configuration
+# ==============================================================================
+# Minimal configuration optimized for demos and quick experiments.
+# Uses smaller patch sizes and conservative settings for laptop compatibility.
+#
+# For full documentation, see CLAUDE.md
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Data Configuration
+# ------------------------------------------------------------------------------
+# IMPORTANT: Update these paths to match your data location before running!
+data:
+  # Directory containing expert SR model predictions
+  # Structure: {models-root}/{MODEL}/{spacing}/output_volumes/{patient}-{pulse}.nii.gz
+  models-root: /path/to/expert/predictions
+
+  # Directory containing high-resolution ground truth volumes
+  # Structure: {hr-root}/{patient}/{patient}-{pulse}.nii.gz
+  hr-root: /path/to/high_resolution
+
+  # Directory containing low-resolution input volumes (optional, for reference)
+  lr-root: /path/to/low_resolution
+
+  # Available resolution spacings
+  spacings: [3mm, 5mm, 7mm]
+
+  # Available MRI pulse sequences
+  pulses: [t1c, t1n, t2w, t2f]
+
+  # Expert SR models to combine
+  models: [BSPLINE, ECLARE, SMORE, UNIRES]
+
+  # Cross-validation settings
+  kfolds: 5
+  seed: 42
+
+  # Output path for K-fold manifest (auto-generated)
+  out: /path/to/kfolds_manifest.json
+
+# ------------------------------------------------------------------------------
+# Registration Configuration (Optional)
+# ------------------------------------------------------------------------------
+# Atlas-based registration for standardization. Set use_registration: false
+# in pacs_sr section to disable.
+registration:
+  atlas: /path/to/atlas/templates
+  t1: T1_brain.nii
+  t2: T2_brain.nii
+  brain_mask: brain_mask.nii
+
+# ------------------------------------------------------------------------------
+# PaCS-SR Model Configuration (Demo-optimized)
+# ------------------------------------------------------------------------------
+pacs_sr:
+  # Experiment identity
+  experiment_name: "PaCS_SR_Demo"
+
+  # Tile geometry (smaller for faster demos)
+  patch_size: 16          # Smaller tiles = faster training (default: 32)
+  stride: 16              # Non-overlapping for simplicity (default: 16)
+  mixing_window: "flat"   # No windowing needed for non-overlapping tiles
+
+  # Optimization (simplified for demos)
+  simplex: true           # Enforce convex weights (required for interpretability)
+  lambda_ridge: 1.0e-4    # Regularization strength
+  laplacian_tau: 0.0      # Disabled for simplicity (default: 0.05)
+  lambda_edge: 0.0        # Disabled for speed (default: 0.25)
+  edge_power: 2.0
+  lambda_grad: 0.0        # Disabled for speed (default: 0.2)
+  grad_operator: "sobel"
+
+  # Normalization
+  normalize: "zscore"     # Per-patient z-score normalization
+
+  # Registration (disabled for faster demos)
+  use_registration: false  # Set true for production (slower but better)
+
+  # Compute settings (laptop-friendly)
+  num_workers: 2          # Conservative for laptops (default: 6)
+  parallel_backend: "loky"
+  device: "cpu"
+
+  # Metrics
+  compute_lpips: false    # Disable for speed (requires torch)
+  compute_kid: false      # Disable for speed (requires torch)
+  ssim_axis: "axial"
+  evaluate_train: false   # Skip train eval for speed
+
+  # Output settings
+  save_weight_volumes: true   # Required for interpretability analysis
+  save_blends: true           # Save blended predictions
+
+  # Logging
+  log_level: "INFO"
+  log_to_file: true
+  log_region_freq: 50     # Less verbose than default
+  disable_tqdm: false     # Show progress bars
+
+  # Output directory
+  out_root: ./demo_output/pacs_sr_results
+
+# ------------------------------------------------------------------------------
+# Visualization Configuration
+# ------------------------------------------------------------------------------
+visualizations:
+  results_root: ./demo_output/pacs_sr_results
+  out_root: ./demo_output/figures
+  dpi: 150  # Lower DPI for faster rendering
+
+# ------------------------------------------------------------------------------
+# Analysis Configuration
+# ------------------------------------------------------------------------------
+analysis:
+  data:
+    gt_dir: /path/to/high_resolution
+    pred_dirs:
+      SMORE: /path/to/smore/predictions
+      ECLARE: /path/to/eclare/predictions
+      BSPLINE: /path/to/bspline/predictions
+      PACS_SR: ./demo_output/pacs_sr_results
+    file_ext: ".nii.gz"
+    sequences: ["t1c", "t2w", "t2f"]
+    allow_missing: true  # More lenient for demos
+
+  metrics:
+    compute: ["psnr", "ssim"]
+    ssim:
+      win_size: 7
+      gaussian_weights: true
+      data_range: "auto"
+
+  stats:
+    paired: true
+    alpha: 0.05
+
+  io:
+    output_dir: ./demo_output/analysis
+    write_csv: true
+    write_json: true
+
+  runtime:
+    seed: 42
+    num_workers: 2
+    progress: true

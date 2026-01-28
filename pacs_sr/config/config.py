@@ -274,6 +274,7 @@ class PacsSRConfig:
     device: str
     # metrics
     compute_lpips: bool
+    compute_kid: bool
     ssim_axis: str
     evaluate_train: bool
     # saving
@@ -312,6 +313,8 @@ class FullConfig:
     predict: Optional[PredictConfig] = None
     # Optional visualization block
     visualizations: Optional["VisualizationsConfig"] = None
+    # Optional pipeline orchestration block
+    pipeline: Optional["PipelineConfig"] = None
 
 
 @dataclass(frozen=True)
@@ -321,6 +324,36 @@ class VisualizationsConfig:
     out_root: Path       # output directory for figures/reports
     # Future extensions: figure dpi, slice selection policy, etc.
     dpi: int = 200
+
+
+@dataclass(frozen=True)
+class FiguresConfig:
+    """Configuration for publication figure generation."""
+    dpi: int = 300
+    format: Tuple[str, ...] = ("pdf", "png")
+    generate_metrics_table: bool = True
+    generate_boxplots: bool = True
+    generate_weight_heatmaps: bool = True
+    generate_patient_examples: bool = True
+
+
+@dataclass(frozen=True)
+class PipelineConfig:
+    """Configuration for the end-to-end pipeline orchestrator."""
+    experiment_name: str
+    output_root: Path
+    timestamp_suffix: bool = True
+    resume: bool = True
+    max_retries: int = 2
+    # Stages to run
+    run_setup: bool = True
+    run_manifest: bool = True
+    run_training: bool = True
+    run_analysis: bool = True
+    run_visualization: bool = True
+    run_report: bool = False
+    # Figure settings
+    figures: FiguresConfig = field(default_factory=FiguresConfig)
 
 def load_data_config(config_dict: dict) -> DataConfig:
     """Parse the data section of the config."""
@@ -403,7 +436,8 @@ def load_pacs_sr_config(
         num_workers=int(config_dict["num_workers"]),
         parallel_backend=str(config_dict.get("parallel_backend", "loky")),
         device=str(config_dict["device"]),
-        compute_lpips=bool(config_dict["compute_lpips"]),
+        compute_lpips=bool(config_dict.get("compute_lpips", False)),
+        compute_kid=bool(config_dict.get("compute_kid", False)),
         ssim_axis=str(config_dict["ssim_axis"]),
         evaluate_train=bool(config_dict.get("evaluate_train", True)),
         save_weight_volumes=bool(config_dict["save_weight_volumes"]),
@@ -471,12 +505,43 @@ def load_full_config(path: Path) -> FullConfig:
             dpi=int(v.get("dpi", 200))
         )
 
+    # Optional pipeline section
+    pipeline_config = None
+    if "pipeline" in yaml_data:
+        p = yaml_data["pipeline"]
+        figures_cfg = FiguresConfig()
+        if "figures" in p:
+            f = p["figures"]
+            figures_cfg = FiguresConfig(
+                dpi=int(f.get("dpi", 300)),
+                format=tuple(f.get("format", ["pdf", "png"])),
+                generate_metrics_table=bool(f.get("generate_metrics_table", True)),
+                generate_boxplots=bool(f.get("generate_boxplots", True)),
+                generate_weight_heatmaps=bool(f.get("generate_weight_heatmaps", True)),
+                generate_patient_examples=bool(f.get("generate_patient_examples", True)),
+            )
+        pipeline_config = PipelineConfig(
+            experiment_name=str(p.get("experiment_name", pacs_sr_config.experiment_name)),
+            output_root=Path(p.get("output_root", pacs_sr_config.out_root)),
+            timestamp_suffix=bool(p.get("timestamp_suffix", True)),
+            resume=bool(p.get("resume", True)),
+            max_retries=int(p.get("max_retries", 2)),
+            run_setup=bool(p.get("stages", {}).get("setup", True)),
+            run_manifest=bool(p.get("stages", {}).get("manifest", True)),
+            run_training=bool(p.get("stages", {}).get("training", True)),
+            run_analysis=bool(p.get("stages", {}).get("analysis", True)),
+            run_visualization=bool(p.get("stages", {}).get("visualization", True)),
+            run_report=bool(p.get("stages", {}).get("report", False)),
+            figures=figures_cfg,
+        )
+
     return FullConfig(
         data=data_config,
         registration=registration_config,
         pacs_sr=pacs_sr_config,
         predict=predict_config,
-        visualizations=viz_config
+        visualizations=viz_config,
+        pipeline=pipeline_config,
     )
 
 

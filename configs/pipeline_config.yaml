@@ -1,0 +1,124 @@
+# ============================================================================
+# PaCS-SR Pipeline Configuration
+# ============================================================================
+# Complete end-to-end pipeline configuration for training, analysis, and
+# visualization. Run with: pacs-sr-run --config configs/pipeline_config.yaml
+# ============================================================================
+
+# --------------------------------
+# Pipeline Orchestration Settings
+# --------------------------------
+pipeline:
+  experiment_name: "PaCS_SR_full_experiment"
+  output_root: "./experiments"
+  timestamp_suffix: true       # Append timestamp to experiment directory
+  resume: true                 # Resume from checkpoint if interrupted
+  max_retries: 2               # Retry failed tasks
+
+  # Enable/disable pipeline stages
+  stages:
+    setup: true
+    manifest: true
+    training: true
+    analysis: true
+    visualization: true
+    report: false              # Optional HTML report generation
+
+  # Publication figure settings
+  figures:
+    dpi: 300
+    format: ["pdf", "png"]
+    generate_metrics_table: true
+    generate_boxplots: true
+    generate_weight_heatmaps: true
+    generate_patient_examples: true
+
+# --------------------------------
+# Data Configuration
+# --------------------------------
+data:
+  # Root directories containing data
+  models-root: "/path/to/superresolution/results/models"
+  hr-root: "/path/to/high_resolution"
+  lr-root: "/path/to/low_resolution"
+
+  # Experimental conditions
+  spacings: ["3mm", "5mm", "7mm"]
+  pulses: ["t1c", "t1n", "t2w", "t2f"]
+
+  # Expert models to combine
+  models: ["BSPLINE", "ECLARE", "SMORE", "UNIRES"]
+
+  # Cross-validation settings
+  kfolds: 5
+  seed: 42
+
+  # Manifest output location
+  out: "/path/to/manifests/kfold_manifest.json"
+
+# --------------------------------
+# Atlas Registration Settings
+# --------------------------------
+registration:
+  atlas: "/path/to/atlas"
+  t1: "T1_atlas.nii.gz"
+  t2: "T2_atlas.nii.gz"
+  epi: "EPI_atlas.nii.gz"
+  pd: "PD_atlas.nii.gz"
+  brain_mask: "brain_mask.nii.gz"
+
+# --------------------------------
+# PaCS-SR Model Configuration
+# --------------------------------
+pacs_sr:
+  experiment_name: "PaCS_SR_full"
+
+  # Patch-based processing
+  patch_size: 32               # 3D patch size (voxels)
+  stride: 16                   # Stride for patch extraction (16 = 50% overlap)
+
+  # Convex optimization
+  simplex: true                # Enforce simplex constraints (w >= 0, sum(w) = 1)
+  lambda_ridge: 0.001          # Ridge regularization
+  laplacian_tau: 0.05          # Spatial smoothness (Laplacian smoothing)
+
+  # Edge-aware weighting
+  lambda_edge: 0.0             # Edge emphasis weight (0 = disabled)
+  edge_power: 1.0
+
+  # Gradient domain augmentation
+  lambda_grad: 0.0             # Gradient matching weight (0 = disabled)
+  grad_operator: "sobel"       # sobel, prewitt, or scharr
+
+  # Blending
+  mixing_window: "hann"        # Window for overlap-add blending
+
+  # Preprocessing
+  normalize: "zscore"          # none, zscore, or minmax
+
+  # Registration
+  use_registration: false      # Enable atlas-based registration
+
+  # Parallel processing
+  num_workers: 8               # Number of parallel workers
+  parallel_backend: "loky"     # loky, threading, or multiprocessing
+  device: "cpu"                # cpu or cuda
+
+  # Metrics computation
+  compute_lpips: false         # Compute LPIPS (requires torch)
+  compute_kid: false           # Compute KID (requires torch)
+  ssim_axis: "z"               # Axis for slice-wise SSIM
+  evaluate_train: false        # Evaluate on training set (slower)
+
+  # Output settings
+  save_weight_volumes: true    # Save per-patient weight maps
+  save_blends: true            # Save blended predictions
+
+  # Logging
+  log_level: "INFO"            # DEBUG, INFO, WARNING, ERROR
+  log_to_file: true
+  log_region_freq: 50          # Log region optimization every N regions
+  disable_tqdm: false          # Set true for SLURM/batch jobs
+
+  # Output directory
+  out_root: "./experiments"

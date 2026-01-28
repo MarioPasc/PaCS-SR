@@ -45,6 +45,7 @@ from __future__ import annotations
 
 # ----------------------------------------------------------------- imports
 import argparse
+import logging
 import multiprocessing.dummy as mp_threads
 import multiprocessing as mp
 import pathlib
@@ -53,6 +54,9 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence, Tuple, List, cast
 
 import warnings
+
+# ----------------------------------------------------------------- logging
+LOGGER = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", message="Mean of empty slice")
 warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 
@@ -75,15 +79,38 @@ try:
     _LPIPS_MODEL = lpips.LPIPS(net="alex").to(_DEVICE).eval()
     _LPIPS_MODEL.requires_grad_(False)
     _USE_THREADS = bool(_DEVICE.type == "cuda")
+    _TORCH_AVAILABLE = True
 except ModuleNotFoundError:                 # library missing → metric = NaN
     _LPIPS_MODEL = None
     _DEVICE = None  # type: ignore[assignment]
     _USE_THREADS = False
+    _TORCH_AVAILABLE = False
+
+# -------- KID (Kernel Inception Distance) metric ---------------------------
+# KID uses Inception V3 features with polynomial kernel MMD
+_KID_MODEL = None
+_KID_AVAILABLE = False
+
+try:
+    if _TORCH_AVAILABLE:
+        from torchvision.models import inception_v3, Inception_V3_Weights
+        # Load Inception V3 with pretrained weights
+        _inception = inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1)
+        _inception.fc = torch.nn.Identity()  # Remove classification head
+        _inception = _inception.to(_DEVICE).eval()
+        _inception.requires_grad_(False)
+        _KID_MODEL = _inception
+        _KID_AVAILABLE = True
+        LOGGER.debug("KID metric available (Inception V3 loaded)")
+except Exception as e:
+    LOGGER.debug("KID metric not available: %s", e)
+    _KID_MODEL = None
+    _KID_AVAILABLE = False
 
 
 # ------------------------------------------------------------- constants ---
 ROI_LABELS   = ("all", "core", "edema", "surround")         # 0,1,2,3
-METRIC_NAMES = ("PSNR", "SSIM")
+METRIC_NAMES = ("PSNR", "SSIM", "LPIPS", "KID")             # image quality metrics
 STAT_NAMES   = ("mean", "std")                              # NEW axis length = 2
 PULSES       = ("t1c", "t1n", "t2w", "t2f")
 RESOLUTIONS  = (3, 5, 7)                                    # mm
@@ -324,6 +351,119 @@ def lpips_slice(hr2d: np.ndarray,
     return d
 
 
+# ----------------- KID (slice-wise, Kernel Inception Distance) -----------
+def _polynomial_mmd(features_hr: np.ndarray, features_sr: np.ndarray,
+                    degree: int = 3, gamma: float = None,
+                    coef0: float = 1.0) -> float:
+    """
+    Compute polynomial kernel Maximum Mean Discrepancy (MMD).
+
+    KID uses a polynomial kernel: k(x, y) = (gamma * x^T y + coef0)^degree
+    Default degree=3 is standard for KID.
+
+    Lower values indicate more similar distributions.
+    """
+    n, m = len(features_hr), len(features_sr)
+    if n == 0 or m == 0:
+        return np.nan
+
+    if gamma is None:
+        gamma = 1.0 / features_hr.shape[1]
+
+    def kernel(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        return (gamma * x @ y.T + coef0) ** degree
+
+    # k(hr, hr)
+    k_xx = kernel(features_hr, features_hr)
+    # k(sr, sr)
+    k_yy = kernel(features_sr, features_sr)
+    # k(hr, sr)
+    k_xy = kernel(features_hr, features_sr)
+
+    # Unbiased MMD estimator
+    # MMD^2 = E[k(x,x')] + E[k(y,y')] - 2*E[k(x,y)]
+    # For unbiased estimate, exclude diagonal for k_xx and k_yy
+    sum_xx = (k_xx.sum() - np.trace(k_xx)) / (n * (n - 1)) if n > 1 else 0
+    sum_yy = (k_yy.sum() - np.trace(k_yy)) / (m * (m - 1)) if m > 1 else 0
+    sum_xy = k_xy.mean()
+
+    mmd_sq = sum_xx + sum_yy - 2 * sum_xy
+    return float(max(0, mmd_sq))  # Clamp to non-negative
+
+
+def kid_slice(hr2d: np.ndarray,
+              sr2d: np.ndarray,
+              mask2d: np.ndarray) -> float:
+    """
+    Compute KID (Kernel Inception Distance) on an axial slice.
+
+    Uses Inception V3 features and polynomial kernel MMD.
+    Lower values indicate more similar images (better SR quality).
+
+    * Voxels **outside** the ROI are zeroed.
+    * Image is resized to 299x299 for Inception V3 input.
+    * Grayscale is replicated to RGB channels.
+    """
+    if not _KID_AVAILABLE or _KID_MODEL is None:
+        return np.nan
+    if not mask2d.any():
+        return np.nan
+
+    # Apply mask
+    hr_masked = hr2d * mask2d
+    sr_masked = sr2d * mask2d
+
+    vmin = min(np.nanmin(hr_masked), np.nanmin(sr_masked))
+    vmax = max(np.nanmax(hr_masked), np.nanmax(sr_masked))
+    if vmax - vmin == 0.0:
+        return np.nan
+
+    # Scale to [0, 1] for Inception preprocessing
+    def _scale_01(img: np.ndarray) -> np.ndarray:
+        return (img - vmin) / (vmax - vmin)
+
+    hr_scaled = _scale_01(hr_masked)
+    sr_scaled = _scale_01(sr_masked)
+
+    # Resize to 299x299 for Inception V3
+    from scipy.ndimage import zoom
+    target_size = 299
+    h, w = hr_scaled.shape
+    zoom_factors = (target_size / h, target_size / w)
+
+    hr_resized = zoom(hr_scaled, zoom_factors, order=1)
+    sr_resized = zoom(sr_scaled, zoom_factors, order=1)
+
+    # Normalize using ImageNet stats (Inception expects this)
+    mean = np.array([0.485, 0.456, 0.406])
+    std = np.array([0.229, 0.224, 0.225])
+
+    def _to_tensor(img: np.ndarray) -> "torch.Tensor":
+        # Replicate grayscale to RGB: (H, W) -> (3, H, W)
+        rgb = np.stack([img, img, img], axis=0)
+        # Normalize per channel
+        for c in range(3):
+            rgb[c] = (rgb[c] - mean[c]) / std[c]
+        t = torch.from_numpy(rgb).float().unsqueeze(0)  # (1, 3, H, W)
+        return t.to(_DEVICE)
+
+    hr_t = _to_tensor(hr_resized)
+    sr_t = _to_tensor(sr_resized)
+
+    with torch.no_grad():
+        # Get Inception features (pool3 layer output after fc=Identity)
+        hr_feat = _KID_MODEL(hr_t).cpu().numpy().flatten()
+        sr_feat = _KID_MODEL(sr_t).cpu().numpy().flatten()
+
+    # For single slice, we have one feature vector each
+    # KID is meant for distributions, but we compute per-slice MMD
+    # and aggregate across slices
+    hr_feat = hr_feat.reshape(1, -1)
+    sr_feat = sr_feat.reshape(1, -1)
+
+    return _polynomial_mmd(hr_feat, sr_feat)
+
+
 # ------------------------------------------------------ per-ROI metrics ---
 def roi_mask(seg: np.ndarray, label: int | None) -> np.ndarray:
     """Return boolean mask selecting ROI `label`; `None` → whole image."""
@@ -347,7 +487,7 @@ def compute_metrics(hr: np.ndarray, sr: np.ndarray,
 
     z_slices = hr.shape[0]
     for ridx, label in enumerate((None, 1, 2, 3)):
-        psnr_vals, ssim_vals, bc_vals, lpips_vals = [], [], [], []
+        psnr_vals, ssim_vals, lpips_vals, kid_vals = [], [], [], []
 
         for z in range(z_slices):
             roi = roi_mask(seg[z], label)
@@ -357,7 +497,6 @@ def compute_metrics(hr: np.ndarray, sr: np.ndarray,
             #  PSNR & Bhattacharyya ───────────────────────────── 1-D voxels
             h_vec, s_vec = hr[z][roi], sr[z][roi]
             psnr_vals.append(psnr(h_vec, s_vec))
-            bc_vals.append(bhattacharyya(h_vec, s_vec))
 
             #  SSIM ──────────────────────────────────────────── 2-D masked
             ssim_vals.append(safe_ssim_slice(hr[z], sr[z], roi))
@@ -365,9 +504,13 @@ def compute_metrics(hr: np.ndarray, sr: np.ndarray,
             #  LPIPS ─────────────────────────────────────────── deep metric
             lpips_vals.append(lpips_slice(hr[z], sr[z], roi))
 
+            #  KID ───────────────────────────────────────────── Inception metric
+            kid_vals.append(kid_slice(hr[z], sr[z], roi))
+
         # write mean/std if we have at least one valid slice
+        # Order must match METRIC_NAMES: ("PSNR", "SSIM", "LPIPS", "KID")
         for vals, midx in zip(
-            (psnr_vals, ssim_vals, bc_vals, lpips_vals),
+            (psnr_vals, ssim_vals, lpips_vals, kid_vals),
             range(len(METRIC_NAMES))
         ):
             if vals:                                     # non-empty list

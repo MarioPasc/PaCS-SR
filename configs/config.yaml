@@ -48,6 +48,7 @@ pacs_sr:
 
   # Metrics
   compute_lpips: false  # requires torch + lpips; optional
+  compute_kid: false    # requires torch + torchvision; optional (Kernel Inception Distance)
   ssim_axis: "axial"    # 'axial' | 'coronal' | 'sagittal' slice-wise averaging
   evaluate_train: true  # compute metrics on train set (can disable for speed)
   # Saving
