@@ -10,7 +10,7 @@
 # --------------------------------
 pipeline:
   experiment_name: "PaCS_SR_full_experiment"
-  output_root: "./experiments"
+  output_root: "/media/hddb/mario/results/PACS_SR/experiments"
   timestamp_suffix: true       # Append timestamp to experiment directory
   resume: true                 # Resume from checkpoint if interrupted
   max_retries: 2               # Retry failed tasks
@@ -38,35 +38,34 @@ pipeline:
 # --------------------------------
 data:
   # Root directories containing data
-  models-root: "/path/to/superresolution/results/models"
-  hr-root: "/path/to/high_resolution"
-  lr-root: "/path/to/low_resolution"
+  models-root: "/media/hddb/mario/results/models/"
+  hr-root: "/media/hddb/mario/data/glioma/high_resolution/"
+  lr-root: "/media/hddb/mario/data/glioma/low_resolution/"
 
   # Experimental conditions
   spacings: ["3mm", "5mm", "7mm"]
   pulses: ["t1c", "t1n", "t2w", "t2f"]
 
   # Expert models to combine
-  models: ["BSPLINE", "ECLARE", "SMORE", "UNIRES"]
+  models: ["BSPLINE", "ECLARE", "SMORE"]
 
   # Cross-validation settings
   kfolds: 5
   seed: 42
 
   # Manifest output location
-  out: "/path/to/manifests/kfold_manifest.json"
+  out: "/media/hddb/mario/results/PACS_SR/experiments/manifests/kfold_manifest.json"
 
 # --------------------------------
 # Atlas Registration Settings
 # --------------------------------
 registration:
-  atlas: "/path/to/atlas"
-  t1: "T1_atlas.nii.gz"
-  t2: "T2_atlas.nii.gz"
-  epi: "EPI_atlas.nii.gz"
-  pd: "PD_atlas.nii.gz"
-  brain_mask: "brain_mask.nii.gz"
-
+  atlas: "/media/hddb/mario/data/meningiomas/mengrowth/templates/"
+  t1: "T1_brain.nii"
+  t2: "T2_brain.nii"
+  epi: "EPI_brain.nii"
+  pd: "PD_brain.nii"
+  brain_mask: "brain_mask.nii"
 # --------------------------------
 # PaCS-SR Model Configuration
 # --------------------------------
@@ -121,4 +120,4 @@ pacs_sr:
   disable_tqdm: false          # Set true for SLURM/batch jobs
 
   # Output directory
-  out_root: "./experiments"
+  out_root: "/media/hddb/mario/results/PACS_SR/evaluation"
