@@ -139,11 +139,9 @@ class TrainingStage(PipelineStage):
         # Get fold data from manifest
         fold_data = manifest["folds"][fold - 1]  # fold is 1-indexed
 
-        # Create fold-specific manifest structure expected by model
-        fold_manifest = {
-            "train": {entry["patient_id"]: entry for entry in fold_data["train"]},
-            "test": {entry["patient_id"]: entry for entry in fold_data["test"]},
-        }
+        # The manifest already has patient IDs as keys in train/test dicts
+        # Structure: {"train": {"patient_id": {patient_data}, ...}, "test": {...}}
+        fold_manifest = fold_data
 
         # Configure model for this task
         pacs_config = self._create_task_config(context, fold, spacing, pulse)

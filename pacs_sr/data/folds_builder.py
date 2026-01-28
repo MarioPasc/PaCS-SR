@@ -202,6 +202,50 @@ def build_manifest(cfg: BuilderConfig) -> Dict:
         logging.info("Fold %d | train=%d test=%d", i, len(train), len(test))
     return {"folds": folds_list}
 
+
+def build_kfold_manifest(
+    models_root: Path,
+    hr_root: Path,
+    lr_root: Optional[Path],
+    spacings: List[str],
+    pulses: List[str],
+    models: List[str],
+    kfolds: int,
+    seed: int,
+) -> Dict:
+    """
+    Convenience wrapper for building K-fold manifest.
+
+    This function provides a simpler interface for the pipeline orchestrator.
+
+    Args:
+        models_root: Root directory containing SR model outputs
+        hr_root: Root directory containing HR ground truth
+        lr_root: Root directory containing LR inputs (optional)
+        spacings: List of spacing values (e.g., ["3mm", "5mm", "7mm"])
+        pulses: List of pulse sequences (e.g., ["t1c", "t1n", "t2w", "t2f"])
+        models: List of expert model names (e.g., ["BSPLINE", "ECLARE", "SMORE"])
+        kfolds: Number of cross-validation folds
+        seed: Random seed for reproducibility
+
+    Returns:
+        Dictionary containing the K-fold manifest structure
+    """
+    setup_logging()
+
+    cfg = BuilderConfig(
+        models_root=Path(models_root).expanduser().resolve(),
+        hr_root=Path(hr_root).expanduser().resolve(),
+        lr_root=Path(lr_root).expanduser().resolve() if lr_root else Path("/tmp"),
+        spacings=tuple(spacings),
+        pulses=tuple(pulses),
+        models=tuple(models),
+        k_folds=kfolds,
+        seed=seed,
+    )
+
+    return build_manifest(cfg)
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build K-fold JSON manifest for SR MoE.")
     parser.add_argument("--models-root", type=Path, required=True)

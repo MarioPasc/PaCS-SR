@@ -141,7 +141,11 @@ class ManifestStage(PipelineStage):
             self.log(context, f"  Fold {i+1}: {n_train} train, {n_test} test")
 
         # Validate that requested spacings and pulses have data
-        sample_patient = folds[0]["train"][0] if folds[0]["train"] else folds[0]["test"][0]
+        # Manifest structure: fold_data["train"] is a dict with patient_id as key
+        train_patients = fold_data["train"]
+        test_patients = fold_data["test"]
+        sample_patient_id = next(iter(train_patients)) if train_patients else next(iter(test_patients))
+        sample_patient = train_patients.get(sample_patient_id) or test_patients.get(sample_patient_id)
 
         for spacing in context.spacings:
             for pulse in context.pulses:
