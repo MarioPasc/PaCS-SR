@@ -22,7 +22,7 @@ pipeline:
     training: true
     analysis: true
     visualization: true
-    report: false              # Optional HTML report generation
+    report: true              # Optional HTML report generation
 
   # Publication figure settings
   figures:
@@ -104,8 +104,8 @@ pacs_sr:
   device: "cpu"                # cpu or cuda
 
   # Metrics computation
-  compute_lpips: false         # Compute LPIPS (requires torch)
-  compute_kid: false           # Compute KID (requires torch)
+  compute_lpips: true         # Compute LPIPS (requires torch)
+  compute_kid: true           # Compute KID (requires torch)
   ssim_axis: "z"               # Axis for slice-wise SSIM
   evaluate_train: false        # Evaluate on training set (slower)
 

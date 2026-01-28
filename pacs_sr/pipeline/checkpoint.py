@@ -111,7 +111,8 @@ class CheckpointManager:
         self._state["config_hash"] = config_hash
 
         # Initialize stages
-        for stage in ["setup", "manifest", "training", "analysis", "visualization", "report"]:
+        for stage in ["setup", "manifest", "training", "analysis", "metrics_computation",
+                      "visualization", "pareto_visualization", "report"]:
             self._state["stages"][stage] = {
                 "status": TaskStatus.PENDING.value,
                 "started_at": None,

@@ -41,6 +41,7 @@ pacs-sr-train = "pacs_sr.cli.train:main"
 pacs-sr-predict = "pacs_sr.cli.predict:main"
 pacs-sr-analyze-metrics = "pacs_sr.cli.analyze_metrics:main"
 pacs-sr-run = "pacs_sr.cli.run_pipeline:main"
+pacs-sr-visualize = "pacs_sr.cli.visualize:main"
 
 [tool.setuptools]
 packages = ["pacs_sr", "pacs_sr.config", "pacs_sr.model", "pacs_sr.utils", "pacs_sr.data", "pacs_sr.cli", "pacs_sr.analysis", "pacs_sr.pipeline", "pacs_sr.pipeline.stages", "pacs_sr.experiments"]

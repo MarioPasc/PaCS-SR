@@ -166,7 +166,9 @@ class PipelineOrchestrator:
             ManifestStage,
             TrainingStage,
             AnalysisStage,
+            MetricsComputationStage,
             VisualizationStage,
+            ParetoVisualizationStage,
         )
 
         return [
@@ -174,7 +176,9 @@ class PipelineOrchestrator:
             ManifestStage(),
             TrainingStage(),
             AnalysisStage(),
+            MetricsComputationStage(),  # Computes all metrics (PSNR, SSIM, LPIPS, KID)
             VisualizationStage(),
+            ParetoVisualizationStage(),  # Pareto frontier plots
         ]
 
     def _create_context(self, experiment_dir: Path) -> PipelineContext:
@@ -320,7 +324,8 @@ class PipelineOrchestrator:
             print(f"  Remaining: {progress['pending']}")
 
         print("\nStages to run:")
-        stages = ["setup", "manifest", "training", "analysis", "visualization"]
+        stages = ["setup", "manifest", "training", "analysis", "metrics_computation",
+                  "visualization", "pareto_visualization"]
         for stage in stages:
             if self.checkpoint and self.checkpoint.is_stage_completed(stage):
                 print(f"  [SKIP] {stage}")

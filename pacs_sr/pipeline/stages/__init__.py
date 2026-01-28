@@ -11,6 +11,8 @@ from .manifest import ManifestStage
 from .training import TrainingStage
 from .analysis import AnalysisStage
 from .visualization import VisualizationStage
+from .metrics_computation import MetricsComputationStage
+from .pareto_visualization import ParetoVisualizationStage
 
 __all__ = [
     "PipelineStage",
@@ -20,4 +22,6 @@ __all__ = [
     "TrainingStage",
     "AnalysisStage",
     "VisualizationStage",
+    "MetricsComputationStage",
+    "ParetoVisualizationStage",
 ]
