@@ -348,7 +348,7 @@ class AnalysisStage(PipelineStage):
                             "groups": [s1, s2],
                             "t_statistic": float(t_stat),
                             "p_value": float(p_value),
-                            "significant_0.05": p_value < 0.05,
+                            "significant_0.05": bool(p_value < 0.05),
                         })
 
         # Normality tests
@@ -367,7 +367,7 @@ class AnalysisStage(PipelineStage):
                 "test": "shapiro_wilk",
                 "statistic": float(stat),
                 "p_value": float(p),
-                "normal_0.05": p > 0.05,
+                "normal_0.05": bool(p > 0.05),
             }
 
         if len(all_ssim) >= 3:
@@ -376,7 +376,7 @@ class AnalysisStage(PipelineStage):
                 "test": "shapiro_wilk",
                 "statistic": float(stat),
                 "p_value": float(p),
-                "normal_0.05": p > 0.05,
+                "normal_0.05": bool(p > 0.05),
             }
 
         return results
