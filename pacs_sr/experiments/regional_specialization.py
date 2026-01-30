@@ -55,8 +55,16 @@ def load_weight_maps(npz_path: Path) -> Tuple[np.ndarray, List[str], dict]:
     if hasattr(model_names, 'tolist'):
         model_names = model_names.tolist()
 
+    def _convert_value(v):
+        """Convert numpy array to Python scalar or list."""
+        if hasattr(v, 'item') and v.ndim == 0:
+            return v.item()  # 0-d array (scalar)
+        elif hasattr(v, 'tolist'):
+            return v.tolist()  # Multi-element array
+        return v
+
     metadata = {
-        k: (v.item() if hasattr(v, 'item') else v)
+        k: _convert_value(v)
         for k, v in data.items()
         if k not in ("weight_maps", "weights", "model_names")
     }
