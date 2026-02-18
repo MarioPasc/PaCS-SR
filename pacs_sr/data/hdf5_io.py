@@ -103,8 +103,11 @@ def has_key(h5_path: Path, key: str) -> bool:
     """
     if not Path(h5_path).exists():
         return False
-    with h5py.File(h5_path, "r") as f:
-        return key in f
+    try:
+        with h5py.File(h5_path, "r") as f:
+            return key in f
+    except OSError:
+        return False
 
 
 # ---------------------------------------------------------------------------

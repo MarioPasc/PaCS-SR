@@ -6,8 +6,8 @@ For each (patient, spacing, pulse):
   2. Apply scipy.ndimage.zoom with order=3 (cubic B-spline) along z-axis only
   3. Save to bspline.h5 with HR affine
 
-Computation (zoom) is parallelized across workers; HDF5 writes are sequential
-because HDF5 does not support concurrent writers.
+All HDF5 access happens in the main process (sequential). Only the zoom
+computation is dispatched to parallel workers.
 
 Usage:
     python scripts/generate_bspline.py --config configs/seram_glioma.yaml
@@ -18,7 +18,7 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 from joblib import Parallel, delayed
@@ -39,68 +39,27 @@ from pacs_sr.data.hdf5_io import (
 LOG = logging.getLogger(__name__)
 
 
-def _compute_one(
-    patient_id: str,
-    spacing: str,
-    pulse: str,
-    source_h5: Path,
-    bspline_h5: Path,
-) -> Tuple[str, str, Optional[Tuple[np.ndarray, np.ndarray]]]:
-    """Compute B-spline interpolation for one (patient, spacing, pulse).
-
-    Returns the result in memory so the caller can write it sequentially.
+def _zoom_one(
+    lr_data: np.ndarray,
+    hr_shape: Tuple[int, int, int],
+) -> np.ndarray:
+    """Apply cubic B-spline zoom. Pure compute, no HDF5 access.
 
     Args:
-        patient_id: Patient ID string.
-        spacing: Spacing string (e.g., "3mm").
-        pulse: Pulse sequence (e.g., "t1c").
-        source_h5: Path to source_data.h5 with HR and LR volumes.
-        bspline_h5: Path to bspline.h5 (checked for skip).
+        lr_data: Low-resolution volume.
+        hr_shape: Target high-resolution shape.
 
     Returns:
-        (status_msg, out_key, data_tuple) where data_tuple is
-        (sr_data, hr_affine) or None if skipped/missing.
+        Zoomed volume as float32.
     """
-    out_key = expert_key(spacing, patient_id, pulse)
-
-    if has_key(bspline_h5, out_key):
-        return (f"SKIP {patient_id}-{pulse} ({spacing}): already exists", out_key, None)
-
-    lr_k = lr_key(spacing, patient_id, pulse)
-    hr_k = hr_key(patient_id, pulse)
-
-    if not has_key(source_h5, lr_k):
-        return (
-            f"MISS {patient_id}-{pulse} ({spacing}): LR key not found",
-            out_key,
-            None,
-        )
-
-    if not has_key(source_h5, hr_k):
-        return (
-            f"MISS {patient_id}-{pulse} ({spacing}): HR key not found",
-            out_key,
-            None,
-        )
-
-    # Load volumes (read-only, safe for concurrent access)
-    lr_data, _ = read_volume(source_h5, lr_k)
-    hr_data, hr_affine = read_volume(source_h5, hr_k)
-    hr_shape = hr_data.shape[:3]
-    del hr_data  # free memory, we only need the shape and affine
-
-    # Compute zoom factors
     zoom_factors = tuple(hr_shape[i] / lr_data.shape[i] for i in range(3))
-
-    # Apply cubic B-spline interpolation (the expensive part)
     sr_data = zoom(lr_data, zoom_factors, order=3)
 
     # Ensure exact shape match (rounding can cause off-by-one)
     if sr_data.shape != hr_shape:
         sr_data = sr_data[: hr_shape[0], : hr_shape[1], : hr_shape[2]]
 
-    msg = f"OK   {patient_id}-{pulse} ({spacing}): {lr_data.shape} -> {sr_data.shape}"
-    return (msg, out_key, (sr_data.astype(np.float32), hr_affine))
+    return sr_data.astype(np.float32)
 
 
 def main() -> None:
@@ -133,26 +92,61 @@ def main() -> None:
     spacings = list(data.spacings)
     pulses = list(data.pulses)
 
-    # Build task list
-    tasks = []
+    # Build task list, filtering skips and misses in the main process
+    tasks = []  # (out_key, lr_data, hr_shape, hr_affine)
+    n_skip = 0
+    n_miss = 0
+
+    LOG.info("Scanning for tasks to process...")
     for patient_id in patients:
         for spacing in spacings:
             for pulse in pulses:
-                tasks.append((patient_id, spacing, pulse, source_h5, bspline_h5))
+                out_key = expert_key(spacing, patient_id, pulse)
 
+                if has_key(bspline_h5, out_key):
+                    n_skip += 1
+                    continue
+
+                lr_k = lr_key(spacing, patient_id, pulse)
+                hr_k = hr_key(patient_id, pulse)
+
+                if not has_key(source_h5, lr_k):
+                    LOG.warning(
+                        "MISS %s-%s (%s): LR key not found", patient_id, pulse, spacing
+                    )
+                    n_miss += 1
+                    continue
+
+                if not has_key(source_h5, hr_k):
+                    LOG.warning(
+                        "MISS %s-%s (%s): HR key not found", patient_id, pulse, spacing
+                    )
+                    n_miss += 1
+                    continue
+
+                # Read data in main process (sequential, safe)
+                lr_data, _ = read_volume(source_h5, lr_k)
+                hr_data, hr_affine = read_volume(source_h5, hr_k)
+                hr_shape = hr_data.shape[:3]
+                del hr_data
+
+                tasks.append((out_key, lr_data, hr_shape, hr_affine))
+
+    total = len(tasks) + n_skip + n_miss
     LOG.info(
-        "Processing %d tasks (%d patients x %d spacings x %d pulses)",
+        "Total %d: %d to process, %d skipped, %d missing",
+        total,
         len(tasks),
-        len(patients),
-        len(spacings),
-        len(pulses),
+        n_skip,
+        n_miss,
     )
 
-    # Process in batches: parallel compute, sequential write
-    # This avoids concurrent HDF5 writes while keeping zoom parallelized.
+    if not tasks:
+        LOG.info("Nothing to do.")
+        return
+
+    # Process in batches: parallel zoom, sequential write
     n_ok = 0
-    n_skip = 0
-    n_miss = 0
     batch_size = args.batch_size
 
     for batch_start in tqdm(
@@ -162,22 +156,15 @@ def main() -> None:
     ):
         batch = tasks[batch_start : batch_start + batch_size]
 
-        # Parallel compute
-        results = Parallel(n_jobs=args.n_jobs)(
-            delayed(_compute_one)(*task) for task in batch
+        # Parallel compute (pure numpy/scipy, no HDF5)
+        sr_volumes = Parallel(n_jobs=args.n_jobs)(
+            delayed(_zoom_one)(lr_data, hr_shape) for _, lr_data, hr_shape, _ in batch
         )
 
-        # Sequential write
-        for msg, out_key, data_tuple in results:
-            if data_tuple is not None:
-                sr_data, hr_affine = data_tuple
-                write_volume(bspline_h5, out_key, sr_data, hr_affine)
-                n_ok += 1
-            elif msg.startswith("SKIP"):
-                n_skip += 1
-            else:
-                n_miss += 1
-                LOG.warning(msg)
+        # Sequential write to bspline.h5
+        for (out_key, _, _, hr_affine), sr_data in zip(batch, sr_volumes):
+            write_volume(bspline_h5, out_key, sr_data, hr_affine)
+            n_ok += 1
 
     LOG.info("Done: %d OK, %d skipped, %d missing", n_ok, n_skip, n_miss)
 
