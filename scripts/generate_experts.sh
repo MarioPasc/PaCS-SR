@@ -58,7 +58,11 @@ mkdir -p "${EXPERTS_DIR}"
 # ========================================================================
 # SUBMIT BSPLINE JOB (CPU-only, high parallelism)
 # ========================================================================
-BSPLINE_JOB_ID=$(sbatch --parsable \
+# Helper: extract numeric job ID from sbatch output (Picasso lua wrapper
+# may print warnings to stdout that corrupt --parsable output).
+_jobid() { echo "$1" | grep -oE '[0-9]+' | tail -1; }
+
+BSPLINE_JOB_ID=$(_jobid "$(sbatch --parsable \
     --job-name="seram_bspline" \
     --time=0-02:00:00 \
     --ntasks=1 \
@@ -68,14 +72,14 @@ BSPLINE_JOB_ID=$(sbatch --parsable \
     --output="${LOG_DIR}/bspline_%j.out" \
     --error="${LOG_DIR}/bspline_%j.err" \
     --export=ALL \
-    "${SCRIPT_DIR}/generate_experts_worker.sh" bspline)
+    "${SCRIPT_DIR}/generate_experts_worker.sh" bspline 2>&1)")
 
 echo "BSPLINE job submitted: ${BSPLINE_JOB_ID}"
 
 # ========================================================================
 # SUBMIT ECLARE JOB (GPU, sequential per volume)
 # ========================================================================
-ECLARE_JOB_ID=$(sbatch --parsable \
+ECLARE_JOB_ID=$(_jobid "$(sbatch --parsable \
     --job-name="seram_eclare" \
     --time=0-12:00:00 \
     --ntasks=1 \
@@ -86,14 +90,14 @@ ECLARE_JOB_ID=$(sbatch --parsable \
     --output="${LOG_DIR}/eclare_%j.out" \
     --error="${LOG_DIR}/eclare_%j.err" \
     --export=ALL \
-    "${SCRIPT_DIR}/generate_experts_worker.sh" eclare)
+    "${SCRIPT_DIR}/generate_experts_worker.sh" eclare 2>&1)")
 
 echo "ECLARE job submitted:  ${ECLARE_JOB_ID}"
 
 # ========================================================================
 # SUBMIT MANIFEST JOB (depends on both experts completing)
 # ========================================================================
-MANIFEST_JOB_ID=$(sbatch --parsable \
+MANIFEST_JOB_ID=$(_jobid "$(sbatch --parsable \
     --dependency=afterok:${BSPLINE_JOB_ID}:${ECLARE_JOB_ID} \
     --job-name="seram_manifest" \
     --time=0-00:30:00 \
@@ -104,7 +108,7 @@ MANIFEST_JOB_ID=$(sbatch --parsable \
     --output="${LOG_DIR}/manifest_%j.out" \
     --error="${LOG_DIR}/manifest_%j.err" \
     --export=ALL \
-    "${SCRIPT_DIR}/run_seram_picasso_worker.sh" manifest)
+    "${SCRIPT_DIR}/run_seram_picasso_worker.sh" manifest 2>&1)")
 
 echo "MANIFEST job submitted: ${MANIFEST_JOB_ID} (after experts)"
 
@@ -113,7 +117,7 @@ echo "MANIFEST job submitted: ${MANIFEST_JOB_ID} (after experts)"
 # ========================================================================
 FOLD_JOBS=""
 for fold in 1 2 3 4 5; do
-    FOLD_JOB_ID=$(sbatch --parsable \
+    FOLD_JOB_ID=$(_jobid "$(sbatch --parsable \
         --dependency=afterok:${MANIFEST_JOB_ID} \
         --job-name="seram_fold${fold}" \
         --time=0-02:00:00 \
@@ -124,7 +128,7 @@ for fold in 1 2 3 4 5; do
         --output="${LOG_DIR}/fold${fold}_%j.out" \
         --error="${LOG_DIR}/fold${fold}_%j.err" \
         --export=ALL \
-        "${SCRIPT_DIR}/run_seram_picasso_worker.sh" train "${fold}")
+        "${SCRIPT_DIR}/run_seram_picasso_worker.sh" train "${fold}" 2>&1)")
 
     echo "FOLD ${fold} job submitted: ${FOLD_JOB_ID} (after manifest)"
     FOLD_JOBS="${FOLD_JOBS}:${FOLD_JOB_ID}"
@@ -133,7 +137,7 @@ done
 # ========================================================================
 # SUBMIT METRICS + FIGURES JOB (depends on all folds completing)
 # ========================================================================
-METRICS_JOB_ID=$(sbatch --parsable \
+METRICS_JOB_ID=$(_jobid "$(sbatch --parsable \
     --dependency=afterok${FOLD_JOBS} \
     --job-name="seram_metrics" \
     --time=0-01:00:00 \
@@ -144,7 +148,7 @@ METRICS_JOB_ID=$(sbatch --parsable \
     --output="${LOG_DIR}/metrics_%j.out" \
     --error="${LOG_DIR}/metrics_%j.err" \
     --export=ALL \
-    "${SCRIPT_DIR}/run_seram_picasso_worker.sh" metrics)
+    "${SCRIPT_DIR}/run_seram_picasso_worker.sh" metrics 2>&1)")
 
 echo "METRICS job submitted: ${METRICS_JOB_ID} (after all folds)"
 
