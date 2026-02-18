@@ -64,6 +64,7 @@ BSPLINE_JOB_ID=$(sbatch --parsable \
     --ntasks=1 \
     --cpus-per-task=16 \
     --mem=32G \
+    --constraint=cpu \
     --output="${LOG_DIR}/bspline_%j.out" \
     --error="${LOG_DIR}/bspline_%j.err" \
     --export=ALL \
@@ -93,12 +94,13 @@ echo "ECLARE job submitted:  ${ECLARE_JOB_ID}"
 # SUBMIT MANIFEST JOB (depends on both experts completing)
 # ========================================================================
 MANIFEST_JOB_ID=$(sbatch --parsable \
-    --dependency=afterok:${BSPLINE_JOB_ID},${ECLARE_JOB_ID} \
+    --dependency=afterok:${BSPLINE_JOB_ID}:${ECLARE_JOB_ID} \
     --job-name="seram_manifest" \
     --time=0-00:30:00 \
     --ntasks=1 \
     --cpus-per-task=1 \
     --mem=4G \
+    --constraint=cpu \
     --output="${LOG_DIR}/manifest_%j.out" \
     --error="${LOG_DIR}/manifest_%j.err" \
     --export=ALL \
@@ -118,6 +120,7 @@ for fold in 1 2 3 4 5; do
         --ntasks=1 \
         --cpus-per-task=12 \
         --mem=32G \
+        --constraint=cpu \
         --output="${LOG_DIR}/fold${fold}_%j.out" \
         --error="${LOG_DIR}/fold${fold}_%j.err" \
         --export=ALL \
@@ -137,6 +140,7 @@ METRICS_JOB_ID=$(sbatch --parsable \
     --ntasks=1 \
     --cpus-per-task=8 \
     --mem=16G \
+    --constraint=cpu \
     --output="${LOG_DIR}/metrics_%j.out" \
     --error="${LOG_DIR}/metrics_%j.err" \
     --export=ALL \
