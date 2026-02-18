@@ -1,0 +1,87 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(*)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "MultiEdit(*)",
+      "Glob(*)",
+      "Grep(*)",
+      "Task(*)",
+      "WebFetch(*)",
+      "WebSearch(*)",
+      "NotebookEdit(*)"
+    ],
+    "deny": [
+      "Bash(rm -rf*)",
+      "Bash(rm -r *)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git reset --hard*)",
+      "Bash(git checkout -- *)",
+      "Bash(git restore *)",
+      "Bash(git clean -f*)",
+      "Bash(git branch -D*)",
+      "Bash(> /dev/*)",
+      "Bash(dd if=*)",
+      "Bash(mkfs*)",
+      "Bash(kill -9*)",
+      "Bash(killall*)",
+      "Bash(pkill*)",
+      "Bash(chmod 777*)",
+      "Bash(curl*|*sh)",
+      "Bash(wget*|*sh)",
+      "Edit(/media/mpascual/Sandisk2TB/research/neuromf/checkpoints/**)",
+      "Write(/media/mpascual/Sandisk2TB/research/neuromf/checkpoints/**)",
+      "Edit(/media/mpascual/Sandisk2TB/research/neuromf/datasets/**)",
+      "Write(/media/mpascual/Sandisk2TB/research/neuromf/datasets/**)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_input.path // \"\"' | { read file_path; if echo \"$file_path\" | grep -qE '\\.py$'; then ~/.conda/envs/neuromf/bin/python -m ruff check --fix \"$file_path\" 2>/dev/null; ~/.conda/envs/neuromf/bin/python -m ruff format \"$file_path\" 2>/dev/null; fi; }"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path // .tool_input.path // \"\"' | { read file_path; case \"$file_path\" in *.env*|*credentials*|*secret*) echo 'BLOCKED: sensitive file' >&2; exit 2;; esac; }"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "notify-send --app-name='Claude Code' --icon=dialog-information 'neuromf Task Complete' \"$(jq -r '.notification // \"Task finished\"')\" 2>/dev/null; (paplay /usr/share/sounds/freedesktop/stereo/window-attention.oga 2>/dev/null || canberra-gtk-play -i complete 2>/dev/null) &"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/compact-context.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

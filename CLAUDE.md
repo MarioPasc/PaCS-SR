@@ -24,8 +24,6 @@ Existing SR methods each have strengths and weaknesses:
 |--------|----------|------------------|
 | **BSPLINE** | Interpolation | Smooth, artifact-free |
 | **ECLARE** | Deep learning | Detail enhancement |
-| **SMORE** | Self-supervised | Noise robustness |
-| **UNIRES** | Unified model | Generalization |
 
 No single method excels everywhere - one might be better for white matter, another for cortical regions.
 

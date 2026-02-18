@@ -9,10 +9,12 @@ from pydantic import BaseModel, Field, field_validator, ValidationError
 # Dataclass containers (lightweight, used at runtime)
 # -----------------------------
 
+
 @dataclass(frozen=True)
 class NormConfig:
     kind: Literal["none", "zscore", "minmax"] = "none"
     clip: Optional[Tuple[float, float]] = None
+
 
 @dataclass(frozen=True)
 class SSIMConfig:
@@ -22,9 +24,11 @@ class SSIMConfig:
     use_sample_covariance: bool = False
     data_range: Union[Literal["auto"], float] = "auto"
 
+
 @dataclass(frozen=True)
 class PSNRConfig:
     data_range: Union[Literal["auto"], float] = "auto"
+
 
 @dataclass(frozen=True)
 class MetricsConfig:
@@ -32,6 +36,7 @@ class MetricsConfig:
     crop_border: int = 0
     ssim: SSIMConfig = SSIMConfig()
     psnr: PSNRConfig = PSNRConfig()
+
 
 @dataclass(frozen=True)
 class AnalysisDataConfig:
@@ -46,22 +51,31 @@ class AnalysisDataConfig:
     dtype: Literal["float32", "float64"] = "float32"
     norm: NormConfig = NormConfig()
 
+
 @dataclass(frozen=True)
 class BootstrapConfig:
     enabled: bool = True
     n_resamples: int = 5000
     ci: float = 0.95
 
+
 @dataclass(frozen=True)
 class StatsConfig:
     paired: bool = True
     alpha: float = 0.05
     multiple_comparison: Literal["none", "bonferroni", "fdr_bh"] = "fdr_bh"
-    tests: Tuple[Literal["ttest_paired", "wilcoxon"], ...] = ("ttest_paired", "wilcoxon")
-    effect_sizes: Tuple[Literal["cohens_dz", "cliffs_delta"], ...] = ("cohens_dz", "cliffs_delta")
+    tests: Tuple[Literal["ttest_paired", "wilcoxon"], ...] = (
+        "ttest_paired",
+        "wilcoxon",
+    )
+    effect_sizes: Tuple[Literal["cohens_dz", "cliffs_delta"], ...] = (
+        "cohens_dz",
+        "cliffs_delta",
+    )
     bootstrap: BootstrapConfig = BootstrapConfig()
     group_by: Tuple[Literal["seq"], ...] = ("seq",)
     compare_methods: Optional[Tuple[Tuple[str, str], ...]] = None
+
 
 @dataclass(frozen=True)
 class IOConfig:
@@ -71,6 +85,7 @@ class IOConfig:
     save_plots: bool = False
     overwrite: bool = True
 
+
 @dataclass(frozen=True)
 class RuntimeConfig:
     seed: int = 1337
@@ -78,6 +93,7 @@ class RuntimeConfig:
     chunk_voxels: int = 20_000_000
     progress: bool = True
     fail_fast: bool = False
+
 
 @dataclass(frozen=True)
 class AnalysisConfig:
@@ -87,13 +103,16 @@ class AnalysisConfig:
     io: IOConfig
     runtime: RuntimeConfig
 
+
 # -----------------------------
 # Pydantic validators (strict parsing)
 # -----------------------------
 
+
 class _NormModel(BaseModel):
     kind: Literal["none", "zscore", "minmax"] = "none"
     clip: Optional[Tuple[float, float]] = None
+
 
 class _SSIMModel(BaseModel):
     win_size: int = 7
@@ -102,14 +121,19 @@ class _SSIMModel(BaseModel):
     use_sample_covariance: bool = False
     data_range: Union[Literal["auto"], float] = "auto"
 
+
 class _PSNRModel(BaseModel):
     data_range: Union[Literal["auto"], float] = "auto"
 
+
 class _MetricsModel(BaseModel):
-    compute: List[str] = Field(default_factory=lambda: ["psnr", "ssim", "mae", "rmse", "ncc"])
+    compute: List[str] = Field(
+        default_factory=lambda: ["psnr", "ssim", "mae", "rmse", "ncc"]
+    )
     crop_border: int = 0
     ssim: _SSIMModel = _SSIMModel()
     psnr: _PSNRModel = _PSNRModel()
+
 
 class _DataModel(BaseModel):
     gt_dir: Path
@@ -123,30 +147,37 @@ class _DataModel(BaseModel):
     dtype: Literal["float32", "float64"] = "float32"
     norm: _NormModel = _NormModel()
 
-    @field_validator("gt_dir", "mask_dir", mode='before')
+    @field_validator("gt_dir", "mask_dir", mode="before")
     @classmethod
     def _expand_dirs(cls, v):
         return Path(v).expanduser().resolve() if v is not None else None
 
-    @field_validator("pred_dirs", mode='before')
+    @field_validator("pred_dirs", mode="before")
     @classmethod
     def _expand_pred_dirs(cls, v):
         return {k: Path(p).expanduser().resolve() for k, p in v.items()}
+
 
 class _BootstrapModel(BaseModel):
     enabled: bool = True
     n_resamples: int = 5000
     ci: float = 0.95
 
+
 class _StatsModel(BaseModel):
     paired: bool = True
     alpha: float = 0.05
     multiple_comparison: Literal["none", "bonferroni", "fdr_bh"] = "fdr_bh"
-    tests: List[Literal["ttest_paired", "wilcoxon"]] = Field(default_factory=lambda: ["ttest_paired","wilcoxon"])
-    effect_sizes: List[Literal["cohens_dz","cliffs_delta"]] = Field(default_factory=lambda: ["cohens_dz","cliffs_delta"])
+    tests: List[Literal["ttest_paired", "wilcoxon"]] = Field(
+        default_factory=lambda: ["ttest_paired", "wilcoxon"]
+    )
+    effect_sizes: List[Literal["cohens_dz", "cliffs_delta"]] = Field(
+        default_factory=lambda: ["cohens_dz", "cliffs_delta"]
+    )
     bootstrap: _BootstrapModel = _BootstrapModel()
     group_by: List[Literal["seq"]] = Field(default_factory=lambda: ["seq"])
     compare_methods: Optional[List[Tuple[str, str]]] = None
+
 
 class _IOModel(BaseModel):
     output_dir: Path = Path("results/analysis")
@@ -155,10 +186,11 @@ class _IOModel(BaseModel):
     save_plots: bool = False
     overwrite: bool = True
 
-    @field_validator("output_dir", mode='before')
+    @field_validator("output_dir", mode="before")
     @classmethod
     def _expand_out(cls, v):
         return Path(v).expanduser().resolve()
+
 
 class _RuntimeModel(BaseModel):
     seed: int = 1337
@@ -167,6 +199,7 @@ class _RuntimeModel(BaseModel):
     progress: bool = True
     fail_fast: bool = False
 
+
 class _AnalysisModel(BaseModel):
     data: _DataModel
     metrics: _MetricsModel = _MetricsModel()
@@ -174,9 +207,11 @@ class _AnalysisModel(BaseModel):
     io: _IOModel = _IOModel()
     runtime: _RuntimeModel = _RuntimeModel()
 
+
 # -----------------------------
 # Public API
 # -----------------------------
+
 
 def parse_analysis_config(yaml_path: str | Path) -> AnalysisConfig:
     """
@@ -208,7 +243,9 @@ def parse_analysis_config(yaml_path: str | Path) -> AnalysisConfig:
             effect_sizes=tuple(d["stats"]["effect_sizes"]),
             bootstrap=BootstrapConfig(**d["stats"]["bootstrap"]),
             group_by=tuple(d["stats"]["group_by"]),
-            compare_methods=tuple(map(tuple, d["stats"]["compare_methods"])) if d["stats"]["compare_methods"] else None,
+            compare_methods=tuple(map(tuple, d["stats"]["compare_methods"]))
+            if d["stats"]["compare_methods"]
+            else None,
         ),
         io=IOConfig(**d["io"]),
         runtime=RuntimeConfig(**d["runtime"]),
@@ -218,9 +255,9 @@ def parse_analysis_config(yaml_path: str | Path) -> AnalysisConfig:
 @dataclass(frozen=True)
 class DataConfig:
     """Configuration for data paths and CV manifest generation."""
-    models_root: Path
-    hr_root: Path
-    lr_root: Path
+
+    source_h5: Path
+    experts_dir: Path
     spacings: Tuple[str, ...]
     pulses: Tuple[str, ...]
     models: Tuple[str, ...]
@@ -232,6 +269,7 @@ class DataConfig:
 @dataclass(frozen=True)
 class ExpertConfig:
     """Configuration for a single expert model in prediction."""
+
     name: str
     opinion_path: Path
 
@@ -239,6 +277,7 @@ class ExpertConfig:
 @dataclass(frozen=True)
 class PredictConfig:
     """Configuration for prediction mode."""
+
     pacs_sr_weights_path: Path
     experts: Dict[str, ExpertConfig]
     out_root: Path
@@ -284,7 +323,9 @@ class PacsSRConfig:
     log_level: str
     log_to_file: bool
     log_region_freq: int
-    disable_tqdm: bool  # Disable tqdm progress bars (use SLURM-friendly logging instead)
+    disable_tqdm: (
+        bool  # Disable tqdm progress bars (use SLURM-friendly logging instead)
+    )
     # paths
     out_root: Path
     # data fields (populated from DataConfig in CLI)
@@ -296,6 +337,7 @@ class PacsSRConfig:
 @dataclass(frozen=True)
 class RegistrationConfig:
     """Configuration for atlas-based registration."""
+
     atlas: Path
     t1: str
     t2: str
@@ -307,6 +349,7 @@ class RegistrationConfig:
 @dataclass(frozen=True)
 class FullConfig:
     """Complete configuration containing all sections."""
+
     data: DataConfig
     registration: RegistrationConfig
     pacs_sr: PacsSRConfig
@@ -320,8 +363,11 @@ class FullConfig:
 @dataclass(frozen=True)
 class VisualizationsConfig:
     """Configuration for visualization outputs and inputs."""
-    results_root: Path   # root where PaCS-SR wrote results (experiment directory lives here)
-    out_root: Path       # output directory for figures/reports
+
+    results_root: (
+        Path  # root where PaCS-SR wrote results (experiment directory lives here)
+    )
+    out_root: Path  # output directory for figures/reports
     # Future extensions: figure dpi, slice selection policy, etc.
     dpi: int = 200
 
@@ -329,6 +375,7 @@ class VisualizationsConfig:
 @dataclass(frozen=True)
 class FiguresConfig:
     """Configuration for publication figure generation."""
+
     dpi: int = 300
     format: Tuple[str, ...] = ("pdf", "png")
     generate_metrics_table: bool = True
@@ -340,6 +387,7 @@ class FiguresConfig:
 @dataclass(frozen=True)
 class PipelineConfig:
     """Configuration for the end-to-end pipeline orchestrator."""
+
     experiment_name: str
     output_root: Path
     timestamp_suffix: bool = True
@@ -355,18 +403,18 @@ class PipelineConfig:
     # Figure settings
     figures: FiguresConfig = field(default_factory=FiguresConfig)
 
+
 def load_data_config(config_dict: dict) -> DataConfig:
     """Parse the data section of the config."""
     return DataConfig(
-        models_root=Path(config_dict["models-root"]),
-        hr_root=Path(config_dict["hr-root"]),
-        lr_root=Path(config_dict["lr-root"]),
+        source_h5=Path(config_dict["source-h5"]),
+        experts_dir=Path(config_dict["experts-dir"]),
         spacings=tuple(config_dict["spacings"]),
         pulses=tuple(config_dict["pulses"]),
         models=tuple(config_dict["models"]),
         kfolds=int(config_dict["kfolds"]),
         seed=int(config_dict["seed"]),
-        out=Path(config_dict["out"])
+        out=Path(config_dict["out"]),
     )
 
 
@@ -378,14 +426,14 @@ def load_registration_config(config_dict: dict) -> RegistrationConfig:
         t2=str(config_dict["t2"]),
         epi=str(config_dict["epi"]),
         pd=str(config_dict["pd"]),
-        brain_mask=str(config_dict["brain_mask"])
+        brain_mask=str(config_dict["brain_mask"]),
     )
 
 
 def load_pacs_sr_config(
     config_dict: dict,
     data_config: Optional[DataConfig] = None,
-    registration_config: Optional[RegistrationConfig] = None
+    registration_config: Optional[RegistrationConfig] = None,
 ) -> PacsSRConfig:
     """
     Parse the pacs_sr section of the config.
@@ -449,7 +497,7 @@ def load_pacs_sr_config(
         out_root=Path(config_dict["out_root"]),
         models=models,
         spacings=spacings,
-        pulses=pulses
+        pulses=pulses,
     )
 
 
@@ -458,14 +506,13 @@ def load_predict_config(config_dict: dict) -> PredictConfig:
     experts = {}
     for expert_id, expert_data in config_dict["experts"].items():
         experts[expert_id] = ExpertConfig(
-            name=expert_data["name"],
-            opinion_path=Path(expert_data["opinion_path"])
+            name=expert_data["name"], opinion_path=Path(expert_data["opinion_path"])
         )
 
     return PredictConfig(
         pacs_sr_weights_path=Path(config_dict["pacs_sr_weights_path"]),
         experts=experts,
-        out_root=Path(config_dict["out_root"])
+        out_root=Path(config_dict["out_root"]),
     )
 
 
@@ -488,7 +535,7 @@ def load_full_config(path: Path) -> FullConfig:
     pacs_sr_config = load_pacs_sr_config(
         yaml_data["pacs_sr"],
         data_config=data_config,
-        registration_config=registration_config
+        registration_config=registration_config,
     )
 
     predict_config = None
@@ -502,7 +549,7 @@ def load_full_config(path: Path) -> FullConfig:
         viz_config = VisualizationsConfig(
             results_root=Path(v["results_root"]),
             out_root=Path(v["out_root"]),
-            dpi=int(v.get("dpi", 200))
+            dpi=int(v.get("dpi", 200)),
         )
 
     # Optional pipeline section
@@ -518,10 +565,14 @@ def load_full_config(path: Path) -> FullConfig:
                 generate_metrics_table=bool(f.get("generate_metrics_table", True)),
                 generate_boxplots=bool(f.get("generate_boxplots", True)),
                 generate_weight_heatmaps=bool(f.get("generate_weight_heatmaps", True)),
-                generate_patient_examples=bool(f.get("generate_patient_examples", True)),
+                generate_patient_examples=bool(
+                    f.get("generate_patient_examples", True)
+                ),
             )
         pipeline_config = PipelineConfig(
-            experiment_name=str(p.get("experiment_name", pacs_sr_config.experiment_name)),
+            experiment_name=str(
+                p.get("experiment_name", pacs_sr_config.experiment_name)
+            ),
             output_root=Path(p.get("output_root", pacs_sr_config.out_root)),
             timestamp_suffix=bool(p.get("timestamp_suffix", True)),
             resume=bool(p.get("resume", True)),

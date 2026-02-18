@@ -30,7 +30,7 @@ data:
   pulses: [t1c, t1n, t2w, t2f]
 
   # Expert SR models to combine
-  models: [BSPLINE, ECLARE, SMORE, UNIRES]
+  models: [BSPLINE, ECLARE]
 
   # Cross-validation settings
   kfolds: 5

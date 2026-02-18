@@ -1,0 +1,46 @@
+data:
+  source-h5: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/gliomas/source_data.h5
+  experts-dir: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/gliomas/experts
+  spacings: [3mm, 5mm, 7mm]
+  pulses: [t1c, t2w, t2f]
+  models: [BSPLINE, ECLARE]
+  kfolds: 5
+  seed: 42
+  out: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/gliomas/seram_manifest.json
+
+registration:
+  atlas: /dev/null
+  t1: T1_brain.nii
+  t2: T2_brain.nii
+  epi: EPI_brain.nii
+  pd: PD_brain.nii
+  brain_mask: brain_mask.nii
+
+pacs_sr:
+  experiment_name: "SERAM_GLI"
+  patch_size: 32
+  stride: 16
+  mixing_window: "hann"
+  simplex: true
+  lambda_ridge: 1.0e-4
+  laplacian_tau: 0.10
+  lambda_edge: 0.25
+  edge_power: 2.0
+  lambda_grad: 0.2
+  grad_operator: "sobel"
+  normalize: "zscore"
+  use_registration: false
+  num_workers: 12
+  parallel_backend: "loky"
+  device: "cpu"
+  compute_lpips: false
+  compute_kid: false
+  ssim_axis: "axial"
+  evaluate_train: false
+  save_weight_volumes: true
+  save_blends: true
+  log_level: "INFO"
+  log_to_file: true
+  log_region_freq: 10
+  disable_tqdm: true
+  out_root: /mnt/home/users/tic_163_uma/mpascual/fscratch/results
