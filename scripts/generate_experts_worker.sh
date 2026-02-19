@@ -95,7 +95,7 @@ with h5py.File('${SOURCE_H5}', 'r') as f:
 "
 
 if [ "${MODE}" = "eclare" ]; then
-    python -c "import eclare; print('ECLARE version:', eclare.__version__)" || {
+    python -c "import eclare; print('ECLARE available')" || {
         echo "ERROR: eclare package not found. Run: pip install eclare"
         exit 1
     }
