@@ -10,7 +10,8 @@
 #   {EXPERTS_DIR}/eclare.h5    — ECLARE expert outputs
 #
 # Usage (from Picasso login node):
-#   bash scripts/generate_experts.sh
+#   bash scripts/generate_experts.sh          # 4 ECLARE shards (default)
+#   bash scripts/generate_experts.sh 8        # 8 ECLARE shards for faster throughput
 # =============================================================================
 
 set -euo pipefail
@@ -39,6 +40,9 @@ export EXPERTS_DIR="/mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/gliom
 export SPACINGS="3mm 5mm 7mm"
 export PULSES="t1c t2w t2f"
 
+# ECLARE parallelism: number of GPU shards (each gets 1 GPU)
+NUM_ECLARE_SHARDS="${1:-4}"
+
 # Log directory
 export LOG_DIR="/mnt/home/users/tic_163_uma/mpascual/execs/pacs_sr/logs"
 mkdir -p "${LOG_DIR}"
@@ -50,6 +54,7 @@ echo "  Experts dir: ${EXPERTS_DIR}"
 echo "  Spacings:    ${SPACINGS}"
 echo "  Pulses:      ${PULSES}"
 echo "  Conda env:   ${CONDA_ENV_NAME}"
+echo "  ECLARE GPUs: ${NUM_ECLARE_SHARDS}"
 echo ""
 
 # Create experts directory
@@ -77,9 +82,12 @@ BSPLINE_JOB_ID=$(_jobid "$(sbatch --parsable \
 echo "BSPLINE job submitted: ${BSPLINE_JOB_ID}"
 
 # ========================================================================
-# SUBMIT ECLARE JOB (GPU, sequential per volume)
+# SUBMIT ECLARE JOB ARRAY (sharded across N GPUs for parallelism)
 # ========================================================================
-ECLARE_JOB_ID=$(_jobid "$(sbatch --parsable \
+LAST_ECLARE_SHARD=$((NUM_ECLARE_SHARDS - 1))
+
+ECLARE_ARRAY_ID=$(_jobid "$(sbatch --parsable \
+    --array=0-${LAST_ECLARE_SHARD} \
     --job-name="seram_eclare" \
     --time=0-12:00:00 \
     --ntasks=1 \
@@ -87,18 +95,41 @@ ECLARE_JOB_ID=$(_jobid "$(sbatch --parsable \
     --mem=32G \
     --constraint=dgx \
     --gres=gpu:1 \
-    --output="${LOG_DIR}/eclare_%j.out" \
-    --error="${LOG_DIR}/eclare_%j.err" \
+    --output="${LOG_DIR}/eclare_shard_%a_%j.out" \
+    --error="${LOG_DIR}/eclare_shard_%a_%j.err" \
     --export=ALL \
-    "${SCRIPT_DIR}/generate_experts_worker.sh" eclare 2>&1)")
+    "${SCRIPT_DIR}/generate_eclare_worker.sh" "${NUM_ECLARE_SHARDS}" 2>&1)")
 
-echo "ECLARE job submitted:  ${ECLARE_JOB_ID}"
+echo "ECLARE array submitted: ${ECLARE_ARRAY_ID} (${NUM_ECLARE_SHARDS} shards)"
+
+# ========================================================================
+# SUBMIT ECLARE MERGE JOB (depends on all ECLARE shards completing)
+# ========================================================================
+ECLARE_MERGE_JOB_ID=$(_jobid "$(sbatch --parsable \
+    --dependency=afterok:${ECLARE_ARRAY_ID} \
+    --job-name="seram_eclare_merge" \
+    --time=0-01:00:00 \
+    --ntasks=1 \
+    --cpus-per-task=1 \
+    --mem=16G \
+    --constraint=cpu \
+    --output="${LOG_DIR}/eclare_merge_%j.out" \
+    --error="${LOG_DIR}/eclare_merge_%j.err" \
+    --export=ALL \
+    --wrap="cd ${REPO_SRC} && \
+module load miniconda3 2>/dev/null || true && \
+source \$(conda info --base)/etc/profile.d/conda.sh 2>/dev/null || true && \
+conda activate ${CONDA_ENV_NAME} 2>/dev/null || source activate ${CONDA_ENV_NAME} && \
+python scripts/merge_eclare_shards.py --experts-dir ${EXPERTS_DIR} --num-shards ${NUM_ECLARE_SHARDS}" \
+    2>&1)")
+
+echo "ECLARE merge submitted: ${ECLARE_MERGE_JOB_ID} (after all shards)"
 
 # ========================================================================
 # SUBMIT MANIFEST JOB (depends on both experts completing)
 # ========================================================================
 MANIFEST_JOB_ID=$(_jobid "$(sbatch --parsable \
-    --dependency=afterok:${BSPLINE_JOB_ID}:${ECLARE_JOB_ID} \
+    --dependency=afterok:${BSPLINE_JOB_ID}:${ECLARE_MERGE_JOB_ID} \
     --job-name="seram_manifest" \
     --time=0-00:30:00 \
     --ntasks=1 \
@@ -159,19 +190,20 @@ echo ""
 echo "=========================================="
 echo " JOBS SUBMITTED"
 echo "=========================================="
-echo "BSPLINE:  ${BSPLINE_JOB_ID}  (CPU, ~30 min)"
-echo "ECLARE:   ${ECLARE_JOB_ID}  (GPU, ~6-10 hrs)"
-echo "MANIFEST: ${MANIFEST_JOB_ID}  (after experts, ~10 min)"
-echo "FOLDS:    ${FOLD_JOBS#:}  (after manifest, ~2 hrs each)"
-echo "METRICS:  ${METRICS_JOB_ID}  (after all folds, ~1 hr)"
+echo "BSPLINE:      ${BSPLINE_JOB_ID}  (CPU, ~30 min)"
+echo "ECLARE array: ${ECLARE_ARRAY_ID}  (${NUM_ECLARE_SHARDS} × GPU, ~8-12h each)"
+echo "ECLARE merge: ${ECLARE_MERGE_JOB_ID}  (after shards, ~30 min)"
+echo "MANIFEST:     ${MANIFEST_JOB_ID}  (after experts, ~10 min)"
+echo "FOLDS:        ${FOLD_JOBS#:}  (after manifest, ~2 hrs each)"
+echo "METRICS:      ${METRICS_JOB_ID}  (after all folds, ~1 hr)"
 echo ""
 echo "Dependency chain:"
-echo "  BSPLINE + ECLARE → MANIFEST → FOLD_1..5 → METRICS"
+echo "  BSPLINE + ECLARE_SHARDS → ECLARE_MERGE → MANIFEST → FOLDS → METRICS"
 echo ""
 echo "Monitor:"
 echo "  squeue -u \$USER"
 echo "  tail -f ${LOG_DIR}/bspline_${BSPLINE_JOB_ID}.out"
-echo "  tail -f ${LOG_DIR}/eclare_${ECLARE_JOB_ID}.out"
+echo "  tail -f ${LOG_DIR}/eclare_shard_0_*.out"
 echo ""
 echo "After completion, verify:"
 echo "  python -c \"import h5py; f=h5py.File('${EXPERTS_DIR}/bspline.h5','r'); print(len(list(f.keys())))\""
