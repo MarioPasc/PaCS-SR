@@ -47,6 +47,13 @@ export PULSES="t1c t2w t2f"
 export LOG_DIR="/mnt/home/users/tic_163_uma/mpascual/execs/pacs_sr/logs"
 mkdir -p "${LOG_DIR}"
 
+# Activate conda on the login node for pre-flight checks
+if command -v conda >/dev/null 2>&1; then
+    # shellcheck disable=SC1091
+    source "$(conda info --base)/etc/profile.d/conda.sh" 2>/dev/null || true
+    conda activate "${CONDA_ENV_NAME}" 2>/dev/null || source activate "${CONDA_ENV_NAME}" 2>/dev/null || true
+fi
+
 echo "Configuration:"
 echo "  Shards:      ${NUM_SHARDS}"
 echo "  Repo:        ${REPO_SRC}"

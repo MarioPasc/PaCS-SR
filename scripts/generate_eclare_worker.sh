@@ -91,91 +91,98 @@ ECLARE_MAIN="${EXPERTS_DIR}/eclare.h5"
 # This shard writes to its own file
 ECLARE_SHARD="${EXPERTS_DIR}/eclare_shard_${SHARD_ID}.h5"
 
-# Get patient list
-PATIENTS=$(python -c "
-from pacs_sr.data.hdf5_io import list_groups
-pts = list_groups('${SOURCE_H5}', 'high_resolution')
-print(' '.join(pts))
-")
+# Build task list in Python: get patients, existing keys, and shard assignment
+# in a single process launch instead of one per task.
+TASK_FILE=$(mktemp /tmp/eclare_tasks_XXXXXX.txt)
+python -c "
+from pacs_sr.data.hdf5_io import list_groups, has_key, expert_key
+import h5py
 
-# Build the full task list (spacing × patient × pulse) and select this shard
-TASK_IDX=0
-SHARD_TOTAL=0
-SHARD_DONE=0
-SHARD_FAIL=0
+source_h5 = '${SOURCE_H5}'
+eclare_main = '${ECLARE_MAIN}'
+eclare_shard = '${ECLARE_SHARD}'
+spacings = '${SPACINGS}'.split()
+pulses = '${PULSES}'.split()
+num_shards = ${NUM_SHARDS}
+shard_id = ${SHARD_ID}
 
-# Count total and shard tasks first
-TOTAL=0
-MY_TOTAL=0
-for spacing in ${SPACINGS}; do
-    for patient_id in ${PATIENTS}; do
-        for pulse in ${PULSES}; do
-            if [ $((TOTAL % NUM_SHARDS)) -eq "${SHARD_ID}" ]; then
-                MY_TOTAL=$((MY_TOTAL + 1))
-            fi
-            TOTAL=$((TOTAL + 1))
-        done
-    done
-done
+patients = list_groups(source_h5, 'high_resolution')
 
-echo "[shard ${SHARD_ID}] Total tasks: ${TOTAL}, this shard: ${MY_TOTAL}"
+# Build set of existing keys in main eclare.h5 + this shard (single open each)
+existing = set()
+for h5_path in [eclare_main, eclare_shard]:
+    try:
+        with h5py.File(h5_path, 'r') as f:
+            def collect(grp, prefix=''):
+                for k in grp:
+                    path = f'{prefix}/{k}' if prefix else k
+                    if isinstance(grp[k], h5py.Dataset):
+                        existing.add(path)
+                    else:
+                        collect(grp[k], path)
+            collect(f)
+    except (OSError, FileNotFoundError):
+        pass
+
+task_idx = 0
+my_total = 0
+my_skip = 0
+for spacing in spacings:
+    thickness = spacing.replace('mm', '')
+    for patient_id in patients:
+        for pulse in pulses:
+            if task_idx % num_shards == shard_id:
+                key = expert_key(spacing, patient_id, pulse)
+                if key in existing:
+                    my_skip += 1
+                else:
+                    print(f'{spacing} {patient_id} {pulse} {thickness}')
+                my_total += 1
+            task_idx += 1
+
+import sys
+print(f'Shard {shard_id}: {my_total} assigned, {my_skip} already done, {my_total - my_skip} to process', file=sys.stderr)
+" > "${TASK_FILE}"
+
+MY_TOTAL=$(wc -l < "${TASK_FILE}")
+echo "[shard ${SHARD_ID}] Tasks to process: ${MY_TOTAL}"
 echo ""
 
 # ========================================================================
 # PROCESS THIS SHARD'S TASKS
 # ========================================================================
-TASK_IDX=0
 MY_IDX=0
+SHARD_DONE=0
+SHARD_FAIL=0
 
-for spacing in ${SPACINGS}; do
-    THICKNESS=$(echo "${spacing}" | sed 's/mm$//')
+while IFS=' ' read -r spacing patient_id pulse thickness; do
+    MY_IDX=$((MY_IDX + 1))
 
-    for patient_id in ${PATIENTS}; do
-        for pulse in ${PULSES}; do
-            # Only process tasks assigned to this shard
-            if [ $((TASK_IDX % NUM_SHARDS)) -eq "${SHARD_ID}" ]; then
-                MY_IDX=$((MY_IDX + 1))
+    echo "[${MY_IDX}/${MY_TOTAL}] Processing: ${patient_id} | ${spacing} | ${pulse}"
 
-                echo "[${MY_IDX}/${MY_TOTAL}] Processing: ${patient_id} | ${spacing} | ${pulse}"
+    if python scripts/eclare_h5_adapter.py \
+        --source-h5 "${SOURCE_H5}" \
+        --expert-h5 "${ECLARE_SHARD}" \
+        --patient-id "${patient_id}" \
+        --spacing "${spacing}" \
+        --pulse "${pulse}" \
+        --thickness "${thickness}" \
+        --gpu-id 0 2>&1; then
+        SHARD_DONE=$((SHARD_DONE + 1))
+    else
+        SHARD_FAIL=$((SHARD_FAIL + 1))
+    fi
 
-                # Skip if already in the main eclare.h5 (from previous runs)
-                ALREADY_DONE=$(python -c "
-from pacs_sr.data.hdf5_io import has_key, expert_key
-k = expert_key('${spacing}', '${patient_id}', '${pulse}')
-print('yes' if has_key('${ECLARE_MAIN}', k) else 'no')
-" 2>/dev/null || echo "no")
+    # Progress report every 25 tasks
+    if [ $((MY_IDX % 25)) -eq 0 ]; then
+        ELAPSED=$(($(date +%s) - START_TIME))
+        AVG=$((ELAPSED / MY_IDX))
+        ETA=$(( AVG * (MY_TOTAL - MY_IDX) / 60 ))
+        echo "  Progress: ${MY_IDX}/${MY_TOTAL} | Done: ${SHARD_DONE} Fail: ${SHARD_FAIL} | ETA: ~${ETA}min"
+    fi
+done < "${TASK_FILE}"
 
-                if [ "${ALREADY_DONE}" = "yes" ]; then
-                    echo "  SKIP (already in eclare.h5)"
-                    SHARD_DONE=$((SHARD_DONE + 1))
-                else
-                    if python scripts/eclare_h5_adapter.py \
-                        --source-h5 "${SOURCE_H5}" \
-                        --expert-h5 "${ECLARE_SHARD}" \
-                        --patient-id "${patient_id}" \
-                        --spacing "${spacing}" \
-                        --pulse "${pulse}" \
-                        --thickness "${THICKNESS}" \
-                        --gpu-id 0 2>&1; then
-                        SHARD_DONE=$((SHARD_DONE + 1))
-                    else
-                        SHARD_FAIL=$((SHARD_FAIL + 1))
-                    fi
-                fi
-
-                # Progress report every 25 tasks
-                if [ $((MY_IDX % 25)) -eq 0 ]; then
-                    ELAPSED=$(($(date +%s) - START_TIME))
-                    AVG=$((ELAPSED / MY_IDX))
-                    ETA=$(( AVG * (MY_TOTAL - MY_IDX) / 60 ))
-                    echo "  Progress: ${MY_IDX}/${MY_TOTAL} | Done: ${SHARD_DONE} Fail: ${SHARD_FAIL} | ETA: ~${ETA}min"
-                fi
-            fi
-
-            TASK_IDX=$((TASK_IDX + 1))
-        done
-    done
-done
+rm -f "${TASK_FILE}"
 
 # ========================================================================
 # OUTPUT VERIFICATION

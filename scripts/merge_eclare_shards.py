@@ -15,7 +15,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import h5py
@@ -30,8 +29,8 @@ def merge_shards(experts_dir: Path, num_shards: int, *, keep: bool = False) -> N
         keep: If True, do not delete shard files after merge.
     """
     main_h5 = experts_dir / "eclare.h5"
-    copied = 0
-    skipped = 0
+    total_copied = 0
+    total_skipped = 0
 
     for shard_id in range(num_shards):
         shard_path = experts_dir / f"eclare_shard_{shard_id}.h5"
@@ -41,18 +40,22 @@ def merge_shards(experts_dir: Path, num_shards: int, *, keep: bool = False) -> N
 
         with h5py.File(shard_path, "r") as src, h5py.File(main_h5, "a") as dst:
             n_src = _count_datasets(src)
-            stats = _merge_stats(src, dst)
+            stats = {"copied": 0, "skipped": 0}
+            _copy_recursive(src, dst, stats)
             print(
                 f"[shard {shard_id}] {n_src} datasets in {shard_path.name}"
-                f" → copy {stats['copied']}, skip {stats['skipped']}"
+                f" → copied {stats['copied']}, skipped {stats['skipped']}"
             )
-            _copy_recursive(src, dst)
+            total_copied += stats["copied"]
+            total_skipped += stats["skipped"]
 
         print(f"  → merged into {main_h5.name}")
 
         if not keep:
             shard_path.unlink()
             print(f"  → deleted {shard_path.name}")
+
+    print(f"\n[summary] Copied: {total_copied}, Skipped: {total_skipped}")
 
     # Final count
     if main_h5.exists():
@@ -97,23 +100,6 @@ def _copy_recursive(
                     stats["skipped"] += 1
         else:
             _copy_recursive(src[key], dst, stats, full_key)
-
-
-def _merge_stats(src: h5py.Group, dst: h5py.File, prefix: str = "") -> dict:
-    """Count how many datasets would be copied vs skipped."""
-    stats = {"copied": 0, "skipped": 0}
-    for key in src:
-        full_key = f"{prefix}/{key}" if prefix else key
-        if isinstance(src[key], h5py.Dataset):
-            if full_key not in dst:
-                stats["copied"] += 1
-            else:
-                stats["skipped"] += 1
-        else:
-            sub = _merge_stats(src[key], dst, full_key)
-            stats["copied"] += sub["copied"]
-            stats["skipped"] += sub["skipped"]
-    return stats
 
 
 def main() -> None:
