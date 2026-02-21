@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH -J seram_pacs
-#SBATCH --time=0-02:00:00
+#SBATCH --time=0-08:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=32G

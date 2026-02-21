@@ -111,7 +111,7 @@ for fold in 1 2 3 4 5; do
     FOLD_JOB_ID=$(_jobid "$(sbatch --parsable \
         --dependency=afterok:${MANIFEST_JOB_ID} \
         --job-name="seram_fold${fold}" \
-        --time=0-02:00:00 \
+        --time=0-08:00:00 \
         --ntasks=1 \
         --cpus-per-task=12 \
         --mem=32G \
@@ -151,7 +151,7 @@ echo "=========================================="
 echo " JOBS SUBMITTED"
 echo "=========================================="
 echo "MANIFEST: ${MANIFEST_JOB_ID}  (immediate, ~10 min)"
-echo "FOLDS:    ${FOLD_JOBS#:}  (after manifest, ~2 hrs each)"
+echo "FOLDS:    ${FOLD_JOBS#:}  (after manifest, ~4 hrs each)"
 echo "METRICS:  ${METRICS_JOB_ID}  (after all folds, ~1 hr)"
 echo ""
 echo "Dependency chain:"
