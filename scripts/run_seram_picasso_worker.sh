@@ -15,6 +15,7 @@
 #   run_seram_picasso_worker.sh manifest
 #   run_seram_picasso_worker.sh train <fold_number>
 #   run_seram_picasso_worker.sh metrics
+#   run_seram_picasso_worker.sh figures
 #
 # Expected env vars (exported by generate_experts.sh):
 #   REPO_SRC, CONDA_ENV_NAME, CONFIG, SOURCE_H5, EXPERTS_DIR
@@ -119,8 +120,17 @@ case "${MODE}" in
         echo "[figures] Done."
         ;;
 
+    figures)
+        echo ""
+        echo "[figures] Generating figures and table..."
+        python -m pacs_sr.seram.figure_comparison_grid --config "${CONFIG}"
+        python -m pacs_sr.seram.figure_performance_plot --config "${CONFIG}"
+        python -m pacs_sr.seram.table_msssim --config "${CONFIG}"
+        echo "[figures] Done."
+        ;;
+
     *)
-        echo "Unknown mode: ${MODE}. Use 'manifest', 'train', or 'metrics'."
+        echo "Unknown mode: ${MODE}. Use 'manifest', 'train', 'metrics', or 'figures'."
         exit 1
         ;;
 esac
