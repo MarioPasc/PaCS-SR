@@ -134,7 +134,7 @@ if [ "${ONLY_FIGURES}" -eq 1 ]; then
     # ── figures only: no manifest, no folds, no metrics ──────────────
     FIGURES_JOB_ID=$(_jobid "$(sbatch --parsable \
         --job-name="seram_figures" \
-        --time=0-01:00:00 \
+        --time=0-10:00:00 \
         --ntasks=1 \
         --cpus-per-task=8 \
         --mem=16G \
@@ -160,7 +160,7 @@ elif [ "${ONLY_METRICS}" -eq 1 ]; then
     # ── metrics + figures only: no manifest, no folds ────────────────
     METRICS_JOB_ID=$(_jobid "$(sbatch --parsable \
         --job-name="seram_metrics" \
-        --time=0-01:00:00 \
+        --time=0-10:00:00 \
         --ntasks=1 \
         --cpus-per-task=8 \
         --mem=16G \
@@ -181,6 +181,30 @@ elif [ "${ONLY_METRICS}" -eq 1 ]; then
     echo "Monitor:"
     echo "  squeue -u \$USER"
     echo "  tail -f ${LOG_DIR}/metrics_${METRICS_JOB_ID}.out"
+
+    FIGURES_JOB_ID=$(_jobid "$(sbatch --parsable \
+        --job-name="seram_figures" \
+        --time=0-10:00:00 \
+        --ntasks=1 \
+        --cpus-per-task=8 \
+        --mem=16G \
+        --constraint=cpu \
+        --output="${LOG_DIR}/figures_%j.out" \
+        --error="${LOG_DIR}/figures_%j.err" \
+        --export=ALL \
+        "${SCRIPT_DIR}/run_seram_picasso_worker.sh" figures 2>&1)")
+
+    echo "FIGURES job submitted: ${FIGURES_JOB_ID}"
+
+    echo ""
+    echo "=========================================="
+    echo " JOBS SUBMITTED"
+    echo "=========================================="
+    echo "FIGURES: ${FIGURES_JOB_ID}  (immediate, ~30 min)"
+    echo ""
+    echo "Monitor:"
+    echo "  squeue -u \$USER"
+    echo "  tail -f ${LOG_DIR}/figures_${FIGURES_JOB_ID}.out"
 
 else
     # ── full pipeline: manifest → folds → metrics + figures ──────────
@@ -224,7 +248,7 @@ else
     METRICS_JOB_ID=$(_jobid "$(sbatch --parsable \
         --dependency=afterok${FOLD_JOBS} \
         --job-name="seram_metrics" \
-        --time=0-01:00:00 \
+        --time=0-10:00:00 \
         --ntasks=1 \
         --cpus-per-task=8 \
         --mem=16G \
