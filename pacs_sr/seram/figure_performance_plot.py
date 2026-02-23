@@ -37,6 +37,7 @@ def generate_performance_plot(
     pulses: List[str],
     spacings: List[str],
     out_path: Path,
+    show_xlabel: bool = True,
 ) -> None:
     """Generate the 1x3 MMD-MF performance subplot.
 
@@ -46,6 +47,7 @@ def generate_performance_plot(
         pulses: List of pulse sequences to plot.
         spacings: List of spacings for x-axis.
         out_path: Output file path.
+        show_xlabel: If False, suppress the "Through-plane spacing" x-axis label.
     """
     apply_ieee_style()
 
@@ -99,7 +101,8 @@ def generate_performance_plot(
 
         ax.set_xticks(x_pos)
         ax.set_xticklabels(spacings)
-        ax.set_xlabel("Through-plane spacing")
+        if show_xlabel:
+            ax.set_xlabel("Through-plane spacing")
         ax.set_title(pulse.upper(), fontsize=PLOT_SETTINGS["axes_titlesize"])
 
         if ax_idx == 0:
@@ -135,6 +138,12 @@ def main() -> None:
     parser.add_argument(
         "--metrics-csv", type=Path, default=None, help="Override metrics CSV path"
     )
+    parser.add_argument(
+        "--no-xlabel",
+        action="store_true",
+        default=False,
+        help="Suppress the 'Through-plane spacing' x-axis label",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -156,6 +165,7 @@ def main() -> None:
         pulses=list(pacs_sr.pulses),
         spacings=list(pacs_sr.spacings),
         out_path=out_dir / "figure2_mmd_mf.pdf",
+        show_xlabel=not args.no_xlabel,
     )
 
 
