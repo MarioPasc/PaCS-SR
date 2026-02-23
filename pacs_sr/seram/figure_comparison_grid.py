@@ -45,6 +45,8 @@ from pacs_sr.data.hdf5_io import (
 )
 from pacs_sr.utils.visualize_pacs_sr import normalize01
 
+from pacs_sr.utils.settings import apply_ieee_style, PLOT_SETTINGS
+
 LOG = logging.getLogger(__name__)
 
 
