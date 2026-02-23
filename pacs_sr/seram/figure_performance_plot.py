@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from pacs_sr.utils.settings import apply_ieee_style, PLOT_SETTINGS
+
 
 LOG = logging.getLogger(__name__)
 
