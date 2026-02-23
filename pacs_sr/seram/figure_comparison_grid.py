@@ -29,6 +29,7 @@ from typing import List, Optional, Tuple
 
 import nibabel as nib
 import numpy as np
+from scipy.ndimage import zoom
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
@@ -237,6 +238,18 @@ def generate_comparison_grid(
                 else:
                     LOG.warning("Missing: %s in %s", exp_k, model_h5)
                     sr_slice = np.zeros_like(gt_slice)
+
+            # Resample via B-spline interpolation if shapes differ
+            if sr_slice.shape != gt_slice.shape:
+                LOG.info(
+                    "Shape mismatch for %s %s: SR %s vs GT %s — resampling",
+                    model_name, spacing, sr_slice.shape, gt_slice.shape,
+                )
+                factors = (
+                    gt_slice.shape[0] / sr_slice.shape[0],
+                    gt_slice.shape[1] / sr_slice.shape[1],
+                )
+                sr_slice = zoom(sr_slice, factors, order=3)
 
             sr_slices.append(normalize01(sr_slice))
             mae_maps.append(np.abs(sr_slice - gt_slice))
