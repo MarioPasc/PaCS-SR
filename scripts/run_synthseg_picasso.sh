@@ -7,16 +7,17 @@
 #   2. Segment: Run SynthSeg per method/spacing (CPU/GPU, ~2h each)
 #   3. Analyze: Compute metrics + stats (CPU, ~30min)
 #
+# The SynthSeg command path is read from the YAML config (synthseg.command).
+#
 # Usage:
 #   bash scripts/run_synthseg_picasso.sh \
-#       --config configs/config.yaml \
-#       --synthseg-env /path/to/synthseg_env \
-#       --synthseg-repo /path/to/SynthSeg \
-#       [--partition gpu] [--account myaccount]
+#       --config configs/seram_glioma_picasso.yaml \
+#       [--partition gpu] [--account myaccount] [--pacs-sr-env /path/to/env]
 #
 # Prerequisites:
 #   - SynthSeg installed (see neuromf setup_synthseg.sh)
-#   - PaCS-SR conda environment activated for export/analyze stages
+#   - PaCS-SR conda environment activated (or pass --pacs-sr-env)
+#   - synthseg.command configured in the YAML config file
 # =============================================================================
 
 set -euo pipefail
@@ -25,30 +26,32 @@ set -euo pipefail
 # PARSE ARGUMENTS
 # ========================================================================
 CONFIG=""
-SYNTHSEG_ENV=""
-SYNTHSEG_REPO=""
 PARTITION="batch"
 ACCOUNT=""
 PACS_SR_ENV="${CONDA_PREFIX:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --config)        CONFIG="$2";        shift 2 ;;
-        --synthseg-env)  SYNTHSEG_ENV="$2";  shift 2 ;;
-        --synthseg-repo) SYNTHSEG_REPO="$2"; shift 2 ;;
-        --partition)     PARTITION="$2";     shift 2 ;;
-        --account)       ACCOUNT="$2";       shift 2 ;;
-        --pacs-sr-env)   PACS_SR_ENV="$2";   shift 2 ;;
+        --config)       CONFIG="$2";       shift 2 ;;
+        --partition)    PARTITION="$2";     shift 2 ;;
+        --account)      ACCOUNT="$2";      shift 2 ;;
+        --pacs-sr-env)  PACS_SR_ENV="$2";  shift 2 ;;
         *)
             echo "Unknown argument: $1"
-            echo "Usage: bash scripts/run_synthseg_picasso.sh --config <cfg> --synthseg-env <env> --synthseg-repo <repo>"
+            echo "Usage: bash scripts/run_synthseg_picasso.sh --config <yaml>"
             exit 1
             ;;
     esac
 done
 
-if [ -z "${CONFIG}" ] || [ -z "${SYNTHSEG_ENV}" ] || [ -z "${SYNTHSEG_REPO}" ]; then
-    echo "Error: --config, --synthseg-env, and --synthseg-repo are required"
+if [ -z "${CONFIG}" ]; then
+    echo "Error: --config is required"
+    echo "Usage: bash scripts/run_synthseg_picasso.sh --config <yaml>"
+    exit 1
+fi
+
+if [ ! -f "${CONFIG}" ]; then
+    echo "Error: config file not found: ${CONFIG}"
     exit 1
 fi
 
@@ -62,24 +65,24 @@ if [ -n "${ACCOUNT}" ]; then
     ACCOUNT_FLAG="#SBATCH --account=${ACCOUNT}"
 fi
 
+# Parse output_dir from YAML using grep/sed (no Python dependency)
+OUTPUT_DIR=$(grep -A0 '^\s*output_dir:' "${CONFIG}" | head -1 | sed 's/.*output_dir:\s*//' | sed 's/["\x27]//g' | xargs)
+if [ -z "${OUTPUT_DIR}" ]; then
+    OUTPUT_DIR="results/synthseg_evaluation"
+fi
+
+# Get absolute path to config for use inside SLURM jobs
+CONFIG_ABS=$(readlink -f "${CONFIG}")
+
 echo "=========================================="
 echo "PaCS-SR SynthSeg Evaluation Pipeline"
 echo "=========================================="
-echo "Config:        ${CONFIG}"
-echo "SynthSeg env:  ${SYNTHSEG_ENV}"
-echo "SynthSeg repo: ${SYNTHSEG_REPO}"
+echo "Config:        ${CONFIG_ABS}"
 echo "PaCS-SR env:   ${PACS_SR_ENV}"
 echo "Partition:     ${PARTITION}"
+echo "Output dir:    ${OUTPUT_DIR}"
 echo ""
 
-# Parse output directory from config
-OUTPUT_DIR=$(python -c "
-import yaml
-with open('${CONFIG}') as f:
-    cfg = yaml.safe_load(f)
-print(cfg.get('synthseg', {}).get('output_dir', 'results/synthseg_evaluation'))
-")
-echo "Output dir:    ${OUTPUT_DIR}"
 mkdir -p "${OUTPUT_DIR}/slurm_logs"
 
 # ========================================================================
@@ -102,7 +105,7 @@ ${ACCOUNT_FLAG}
 source activate ${PACS_SR_ENV} 2>/dev/null || conda activate ${PACS_SR_ENV}
 
 echo "=== Stage 1: Export ==="
-python -m pacs_sr.cli.synthseg_eval --config ${CONFIG} export
+python -m pacs_sr.cli.synthseg_eval --config ${CONFIG_ABS} export
 echo "=== Export complete ==="
 HEREDOC
 
@@ -112,9 +115,6 @@ echo "Submitted export job: ${EXPORT_JOB}"
 # ========================================================================
 # STAGE 2: SEGMENT (Run SynthSeg)
 # ========================================================================
-# We run SynthSeg as a single job that iterates over all directories.
-# SynthSeg handles GPU internally if available.
-
 SEGMENT_SCRIPT="${OUTPUT_DIR}/slurm_logs/segment.sh"
 cat > "${SEGMENT_SCRIPT}" << HEREDOC
 #!/usr/bin/env bash
@@ -132,7 +132,7 @@ ${ACCOUNT_FLAG}
 source activate ${PACS_SR_ENV} 2>/dev/null || conda activate ${PACS_SR_ENV}
 
 echo "=== Stage 2: Segment (SynthSeg) ==="
-python -m pacs_sr.cli.synthseg_eval --config ${CONFIG} segment
+python -m pacs_sr.cli.synthseg_eval --config ${CONFIG_ABS} segment
 echo "=== Segment complete ==="
 HEREDOC
 
@@ -159,7 +159,7 @@ ${ACCOUNT_FLAG}
 source activate ${PACS_SR_ENV} 2>/dev/null || conda activate ${PACS_SR_ENV}
 
 echo "=== Stage 3: Analyze ==="
-python -m pacs_sr.cli.synthseg_eval --config ${CONFIG} analyze
+python -m pacs_sr.cli.synthseg_eval --config ${CONFIG_ABS} analyze
 echo "=== Analysis complete ==="
 HEREDOC
 
