@@ -4,44 +4,37 @@
 #
 # Submits a 3-stage SLURM pipeline:
 #   1. Export:  HDF5 → NIfTI (CPU, ~1h)
-#   2. Segment: Run SynthSeg per method/spacing (CPU/GPU, ~2h each)
+#   2. Segment: Run SynthSeg on GPU (DGX constraint, ~2h)
 #   3. Analyze: Compute metrics + stats (CPU, ~30min)
 #
-# The SynthSeg command path is read from the YAML config (synthseg.command).
+# SynthSeg command path is read from the YAML config (synthseg.command).
 #
-# Usage:
-#   bash scripts/run_synthseg_picasso.sh \
-#       --config configs/seram_glioma_picasso.yaml \
-#       [--partition gpu] [--account myaccount] [--pacs-sr-env /path/to/env]
+# Usage (from Picasso login node):
+#   bash scripts/run_synthseg_picasso.sh --config configs/seram_glioma_picasso.yaml
 #
 # Prerequisites:
 #   - SynthSeg installed (see neuromf setup_synthseg.sh)
-#   - PaCS-SR conda environment activated (or pass --pacs-sr-env)
 #   - synthseg.command configured in the YAML config file
 # =============================================================================
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ========================================================================
 # PARSE ARGUMENTS
 # ========================================================================
 CONFIG=""
-PARTITION="batch"
-ACCOUNT=""
-PACS_SR_ENV="${CONDA_PREFIX:-}"
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --config)       CONFIG="$2";       shift 2 ;;
-        --partition)    PARTITION="$2";     shift 2 ;;
-        --account)      ACCOUNT="$2";      shift 2 ;;
-        --pacs-sr-env)  PACS_SR_ENV="$2";  shift 2 ;;
-        *)
-            echo "Unknown argument: $1"
+for arg in "$@"; do
+    case "${arg}" in
+        --config)  shift; CONFIG="$1" ;;
+        -h|--help)
             echo "Usage: bash scripts/run_synthseg_picasso.sh --config <yaml>"
-            exit 1
+            exit 0
             ;;
     esac
+    shift 2>/dev/null || true
 done
 
 if [ -z "${CONFIG}" ]; then
@@ -55,124 +48,105 @@ if [ ! -f "${CONFIG}" ]; then
     exit 1
 fi
 
-if [ -z "${PACS_SR_ENV}" ]; then
-    echo "Error: activate PaCS-SR conda env or pass --pacs-sr-env"
-    exit 1
-fi
+# ========================================================================
+# CONFIGURATION
+# ========================================================================
+export CONDA_ENV_NAME="pacs"
+export REPO_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export CONFIG_ABS="$(readlink -f "${CONFIG}")"
 
-ACCOUNT_FLAG=""
-if [ -n "${ACCOUNT}" ]; then
-    ACCOUNT_FLAG="#SBATCH --account=${ACCOUNT}"
-fi
-
-# Parse output_dir from YAML using grep/sed (no Python dependency)
+# Parse output_dir from YAML using grep/sed (no Python dependency on login node)
 OUTPUT_DIR=$(grep -A0 '^\s*output_dir:' "${CONFIG}" | head -1 | sed 's/.*output_dir:\s*//' | sed 's/["\x27]//g' | xargs)
 if [ -z "${OUTPUT_DIR}" ]; then
     OUTPUT_DIR="results/synthseg_evaluation"
 fi
+export OUTPUT_DIR
 
-# Get absolute path to config for use inside SLURM jobs
-CONFIG_ABS=$(readlink -f "${CONFIG}")
+# Log directory
+export LOG_DIR="${REPO_SRC}/${OUTPUT_DIR}/slurm_logs"
+mkdir -p "${LOG_DIR}"
 
 echo "=========================================="
-echo "PaCS-SR SynthSeg Evaluation Pipeline"
+echo " PaCS-SR SynthSeg Evaluation Pipeline"
 echo "=========================================="
-echo "Config:        ${CONFIG_ABS}"
-echo "PaCS-SR env:   ${PACS_SR_ENV}"
-echo "Partition:     ${PARTITION}"
-echo "Output dir:    ${OUTPUT_DIR}"
+echo "Time:       $(date)"
+echo "Config:     ${CONFIG_ABS}"
+echo "Repo:       ${REPO_SRC}"
+echo "Conda env:  ${CONDA_ENV_NAME}"
+echo "Output dir: ${OUTPUT_DIR}"
+echo "Log dir:    ${LOG_DIR}"
 echo ""
 
-mkdir -p "${OUTPUT_DIR}/slurm_logs"
+# Helper: extract numeric job ID from sbatch output (Picasso lua wrapper
+# may print warnings to stdout that corrupt --parsable output).
+_jobid() { echo "$1" | grep -oE '[0-9]+' | tail -1; }
 
 # ========================================================================
-# STAGE 1: EXPORT (HDF5 → NIfTI)
+# STAGE 1: EXPORT (HDF5 → NIfTI) — CPU
 # ========================================================================
-EXPORT_SCRIPT="${OUTPUT_DIR}/slurm_logs/export.sh"
-cat > "${EXPORT_SCRIPT}" << HEREDOC
-#!/usr/bin/env bash
-#SBATCH --job-name=synthseg-export
-#SBATCH --partition=${PARTITION}
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=8G
-#SBATCH --time=01:00:00
-#SBATCH --output=${OUTPUT_DIR}/slurm_logs/export_%j.out
-#SBATCH --error=${OUTPUT_DIR}/slurm_logs/export_%j.err
-${ACCOUNT_FLAG}
+EXPORT_JOB_ID=$(_jobid "$(sbatch --parsable \
+    --job-name="synthseg_export" \
+    --time=0-01:00:00 \
+    --ntasks=1 \
+    --cpus-per-task=4 \
+    --mem=8G \
+    --constraint=cpu \
+    --output="${LOG_DIR}/export_%j.out" \
+    --error="${LOG_DIR}/export_%j.err" \
+    --export=ALL \
+    "${SCRIPT_DIR}/run_synthseg_picasso_worker.sh" export 2>&1)")
 
-source activate ${PACS_SR_ENV} 2>/dev/null || conda activate ${PACS_SR_ENV}
-
-echo "=== Stage 1: Export ==="
-python -m pacs_sr.cli.synthseg_eval --config ${CONFIG_ABS} export
-echo "=== Export complete ==="
-HEREDOC
-
-EXPORT_JOB=$(sbatch --parsable "${EXPORT_SCRIPT}")
-echo "Submitted export job: ${EXPORT_JOB}"
+echo "EXPORT job submitted: ${EXPORT_JOB_ID}"
 
 # ========================================================================
-# STAGE 2: SEGMENT (Run SynthSeg)
+# STAGE 2: SEGMENT (Run SynthSeg) — GPU (DGX)
 # ========================================================================
-SEGMENT_SCRIPT="${OUTPUT_DIR}/slurm_logs/segment.sh"
-cat > "${SEGMENT_SCRIPT}" << HEREDOC
-#!/usr/bin/env bash
-#SBATCH --job-name=synthseg-segment
-#SBATCH --partition=${PARTITION}
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=16G
-#SBATCH --time=08:00:00
-#SBATCH --output=${OUTPUT_DIR}/slurm_logs/segment_%j.out
-#SBATCH --error=${OUTPUT_DIR}/slurm_logs/segment_%j.err
-${ACCOUNT_FLAG}
+SEGMENT_JOB_ID=$(_jobid "$(sbatch --parsable \
+    --dependency=afterok:${EXPORT_JOB_ID} \
+    --job-name="synthseg_segment" \
+    --time=0-08:00:00 \
+    --ntasks=1 \
+    --cpus-per-task=8 \
+    --mem=16G \
+    --constraint=dgx \
+    --gres=gpu:1 \
+    --output="${LOG_DIR}/segment_%j.out" \
+    --error="${LOG_DIR}/segment_%j.err" \
+    --export=ALL \
+    "${SCRIPT_DIR}/run_synthseg_picasso_worker.sh" segment 2>&1)")
 
-source activate ${PACS_SR_ENV} 2>/dev/null || conda activate ${PACS_SR_ENV}
-
-echo "=== Stage 2: Segment (SynthSeg) ==="
-python -m pacs_sr.cli.synthseg_eval --config ${CONFIG_ABS} segment
-echo "=== Segment complete ==="
-HEREDOC
-
-SEGMENT_JOB=$(sbatch --parsable --dependency=afterok:${EXPORT_JOB} "${SEGMENT_SCRIPT}")
-echo "Submitted segment job: ${SEGMENT_JOB} (depends on ${EXPORT_JOB})"
+echo "SEGMENT job submitted: ${SEGMENT_JOB_ID} (after export)"
 
 # ========================================================================
-# STAGE 3: ANALYZE (Metrics + Statistics)
+# STAGE 3: ANALYZE (Metrics + Statistics) — CPU
 # ========================================================================
-ANALYZE_SCRIPT="${OUTPUT_DIR}/slurm_logs/analyze.sh"
-cat > "${ANALYZE_SCRIPT}" << HEREDOC
-#!/usr/bin/env bash
-#SBATCH --job-name=synthseg-analyze
-#SBATCH --partition=${PARTITION}
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=4G
-#SBATCH --time=00:30:00
-#SBATCH --output=${OUTPUT_DIR}/slurm_logs/analyze_%j.out
-#SBATCH --error=${OUTPUT_DIR}/slurm_logs/analyze_%j.err
-${ACCOUNT_FLAG}
+ANALYZE_JOB_ID=$(_jobid "$(sbatch --parsable \
+    --dependency=afterok:${SEGMENT_JOB_ID} \
+    --job-name="synthseg_analyze" \
+    --time=0-00:30:00 \
+    --ntasks=1 \
+    --cpus-per-task=4 \
+    --mem=4G \
+    --constraint=cpu \
+    --output="${LOG_DIR}/analyze_%j.out" \
+    --error="${LOG_DIR}/analyze_%j.err" \
+    --export=ALL \
+    "${SCRIPT_DIR}/run_synthseg_picasso_worker.sh" analyze 2>&1)")
 
-source activate ${PACS_SR_ENV} 2>/dev/null || conda activate ${PACS_SR_ENV}
-
-echo "=== Stage 3: Analyze ==="
-python -m pacs_sr.cli.synthseg_eval --config ${CONFIG_ABS} analyze
-echo "=== Analysis complete ==="
-HEREDOC
-
-ANALYZE_JOB=$(sbatch --parsable --dependency=afterok:${SEGMENT_JOB} "${ANALYZE_SCRIPT}")
-echo "Submitted analyze job: ${ANALYZE_JOB} (depends on ${SEGMENT_JOB})"
+echo "ANALYZE job submitted: ${ANALYZE_JOB_ID} (after segment)"
 
 echo ""
 echo "=========================================="
-echo "Pipeline submitted:"
-echo "  Export:  ${EXPORT_JOB}"
-echo "  Segment: ${SEGMENT_JOB}"
-echo "  Analyze: ${ANALYZE_JOB}"
-echo ""
-echo "Monitor: squeue -u \$USER"
-echo "Results: ${OUTPUT_DIR}/"
+echo " JOBS SUBMITTED"
 echo "=========================================="
+echo "EXPORT:  ${EXPORT_JOB_ID}  (immediate, ~30 min)"
+echo "SEGMENT: ${SEGMENT_JOB_ID}  (after export, ~4 hrs on GPU)"
+echo "ANALYZE: ${ANALYZE_JOB_ID}  (after segment, ~15 min)"
+echo ""
+echo "Dependency chain:"
+echo "  EXPORT → SEGMENT (GPU) → ANALYZE"
+echo ""
+echo "Monitor:"
+echo "  squeue -u \$USER"
+echo "  tail -f ${LOG_DIR}/export_${EXPORT_JOB_ID}.out"
+echo ""
