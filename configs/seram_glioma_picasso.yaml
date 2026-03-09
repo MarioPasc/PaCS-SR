@@ -34,7 +34,7 @@ synthseg:
   reference_method: "PACS_SR"
 
   # Output
-  output_dir: "results/synthseg_evaluation"
+  output_dir: "/mnt/home/users/tic_163_uma/mpascual/execs/pacs_sr/synthseg_glioma"
   cleanup_nifti: true     # Set true on HPC to reduce inode usage
 
 registration:
