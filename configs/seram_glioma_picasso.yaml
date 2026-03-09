@@ -8,6 +8,35 @@ data:
   seed: 42
   out: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/gliomas/seram_manifest.json
 
+
+synthseg:
+  # SynthSeg command (subprocess-isolated from main env to avoid TF/Keras conflicts)
+  # Option 1: Standalone repo (recommended for HPC without FreeSurfer)
+  command:
+    - "/mnt/home/users/tic_163_uma/mpascual/fscratch/tools/synthseg_env/bin/python"
+    - "/mnt/home/users/tic_163_uma/mpascual/fscratch/tools/SynthSeg/scripts/commands/SynthSeg_predict.py"
+  # Option 2: FreeSurfer binary
+  # command: ["mri_synthseg"]
+
+  # SynthSeg parameters
+  robust: true            # Use robust model (--robust flag)
+  threads: 1              # CPU threads per SynthSeg invocation
+  crop: 0                 # Crop size (divisible by 32, 0 = default 192)
+
+  # Evaluation scope
+  methods: ["HR", "BSPLINE", "ECLARE", "PACS_SR"]
+  spacings: ["3mm", "5mm", "7mm"]
+  pulse: "t1c"            # T1 only per hypothesis
+
+  # Statistical analysis
+  alpha: 0.05
+  correction: "fdr_bh"    # Benjamini-Hochberg FDR
+  reference_method: "PACS_SR"
+
+  # Output
+  output_dir: "results/synthseg_evaluation"
+  cleanup_nifti: true     # Set true on HPC to reduce inode usage
+
 registration:
   atlas: /dev/null
   t1: T1_brain.nii
@@ -43,4 +72,4 @@ pacs_sr:
   log_to_file: true
   log_region_freq: 10
   disable_tqdm: true
-  out_root: /mnt/home/users/tic_163_uma/mpascual/fscratch/results
+  out_root: /mnt/home/users/tic_163_uma/mpascual/fscratch/datasets/gliomas/experts

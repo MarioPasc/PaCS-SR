@@ -41,6 +41,11 @@ from .cross_resolution import (
     train_and_transfer,
     compute_generalization_gap,
 )
+from .synthseg_evaluation import (
+    SynthSegEvalConfig,
+    load_synthseg_eval_config,
+    run_full_pipeline as run_synthseg_evaluation,
+)
 
 __all__ = [
     # Regional specialization
@@ -53,4 +58,8 @@ __all__ = [
     # Cross-resolution
     "train_and_transfer",
     "compute_generalization_gap",
+    # SynthSeg evaluation
+    "SynthSegEvalConfig",
+    "load_synthseg_eval_config",
+    "run_synthseg_evaluation",
 ]

@@ -290,6 +290,72 @@ python -m pacs_sr.experiments.cross_resolution \
 
 ---
 
+## Scientific Development Protocol
+
+### 1. Evidence-Grounded Changes
+- Every non-trivial decision must cite: a paper, a mathematical justification, or empirical data.
+- "I think this is better" is not valid. "This reduces variance because [formula/reference]" is.
+- When proposing architectural or methodological changes, state the expected effect and why.
+- If no evidence exists, flag it explicitly as a hypothesis and propose a way to test it.
+
+### 2. Research Workflow: Plan → Test → Analyze → Fix
+**Planning phase:**
+- Break the task into checkable items in `tasks/todo.md`.
+- For each item, annotate: objective, success metric, and relevant references.
+- Proactively flag: "Based on [paper/method], we could also try X — want me to include it?"
+- Write specs before code. Ambiguity in spec = ambiguity in results.
+
+**Testing phase:**
+- Define quantitative success criteria before running anything.
+- Log all hyperparameters, seeds, and environment details (reproducibility is non-negotiable).
+- Use controlled comparisons: change one variable at a time unless explicitly doing ablations.
+
+**Analysis phase:**
+- Be proactive: if results reveal an anomaly or improvement opportunity, report it with evidence.
+- Propose fixes or enhancements with: (a) what you found, (b) why it matters, (c) what to do.
+- Always compute and report: mean, std, confidence intervals or statistical tests where applicable.
+- Distinguish between statistically significant and practically significant differences.
+- If a metric degrades, investigate root cause before proposing a fix.
+
+**Fixing phase:**
+- Fixes must reference what the analysis revealed. No blind patches.
+- After fixing, re-run the relevant test to confirm the fix and check for regressions.
+- Update `docs/tasks/lessons.md` or task-specific file with the failure mode and the corrective pattern.
+
+### 3. Interdisciplinary Rigor (CS × AI × Biomedicine)
+- Code changes: justify with computational complexity, memory, or convergence arguments.
+- Model changes: justify with loss landscape, gradient dynamics, or information-theoretic reasoning.
+- Clinical/biomedical changes: justify with domain constraints (e.g., anatomical priors, acquisition physics, class imbalance in rare pathologies).
+- When in doubt about clinical validity, flag it — do not assume.
+
+### 4. Proactive Scientific Agent Behavior
+- During planning and analysis: if you identify a method, paper, or trick that could improve the current approach, **propose it immediately** with a one-line rationale.
+- Suggest ablations or controls the user may not have considered.
+- If a result contradicts expectations, form a hypothesis and propose a diagnostic experiment.
+- Never silently ignore warnings, NaNs, or unexpected distributions — investigate and report.
+
+### 5. Code & Experiment Standards
+- All functions: typed, documented (docstring, no usage examples), brief inline comments.
+- Prefer libraries over custom implementations. Cite the library and version.
+- Logging over print. Use `logging` module with appropriate levels.
+- Atomic functions, low cyclomatic complexity, OOP with dataclasses where appropriate.
+- Experiment configs: use YAML/JSON, never hardcode hyperparameters in scripts.
+- Random seeds must be set and logged. Results must be reproducible.
+
+### 6. Communication Standards
+- When reporting results: tables > prose. Include units, dataset split, and N.
+- When proposing changes: state the current state, the proposed change, and the expected delta.
+- When uncertain: quantify uncertainty. "This might work" → "This has ~X% chance based on [reasoning]."
+- Use LaTeX notation for any mathematical expression in documentation or comments.
+
+### 7. Verification & Self-Correction
+- Never mark a task done without quantitative evidence it works.
+- After any correction from the user: update `docs/tasks/lessons.md` or task-specific file with the pattern.
+- Challenge your own proposals before presenting them. Ask: "What could go wrong?"
+- If a subagent is used, verify its output — trust but verify.
+
+---
+
 ## 7. Technical Reference
 
 ### 7.1 Expert Models
@@ -298,9 +364,6 @@ python -m pacs_sr.experiments.cross_resolution \
 |--------|------|-------------|
 | **BSPLINE** | Classical | B-spline interpolation |
 | **ECLARE** | Deep Learning | Explicit Contrastive Learning for SR |
-| **SMORE** | Self-supervised | Self-supervised MRI SR |
-| **UNIRES** | Multi-task | Unified Resolution Enhancement |
-
 ### 7.2 Algorithm Pseudocode
 
 ```
