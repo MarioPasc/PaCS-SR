@@ -15,6 +15,9 @@
 # Prerequisites:
 #   - SynthSeg installed (see neuromf setup_synthseg.sh)
 #   - synthseg.command configured in the YAML config file
+#
+# Resume: The segment stage is fully resumable — just resubmit this script.
+# It skips volumes whose label maps already exist from a previous run.
 # =============================================================================
 
 set -euo pipefail
@@ -104,7 +107,7 @@ echo "EXPORT job submitted: ${EXPORT_JOB_ID}"
 SEGMENT_JOB_ID=$(_jobid "$(sbatch --parsable \
     --dependency=afterok:${EXPORT_JOB_ID} \
     --job-name="synthseg_segment" \
-    --time=0-08:00:00 \
+    --time=1-00:00:00 \
     --ntasks=1 \
     --cpus-per-task=8 \
     --mem=16G \
@@ -140,7 +143,7 @@ echo "=========================================="
 echo " JOBS SUBMITTED"
 echo "=========================================="
 echo "EXPORT:  ${EXPORT_JOB_ID}  (immediate, ~30 min)"
-echo "SEGMENT: ${SEGMENT_JOB_ID}  (after export, ~4 hrs on GPU)"
+echo "SEGMENT: ${SEGMENT_JOB_ID}  (after export, per-volume resumable, up to 24h)"
 echo "ANALYZE: ${ANALYZE_JOB_ID}  (after segment, ~15 min)"
 echo ""
 echo "Dependency chain:"

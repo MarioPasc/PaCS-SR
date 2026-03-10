@@ -375,23 +375,39 @@ def check_synthseg_available(command: List[str] | Tuple[str, ...]) -> bool:
     return True
 
 
-def run_synthseg_on_directory(
-    input_dir: Path,
-    labels_dir: Path,
-    volumes_csv: Path,
+def _label_path_for_input(labels_dir: Path, input_nifti: Path) -> Path:
+    """Derive the expected SynthSeg label map path for an input NIfTI.
+
+    SynthSeg appends ``_synthseg`` to the stem when given per-file input.
+
+    Args:
+        labels_dir: Directory where SynthSeg writes labels.
+        input_nifti: Path to the input NIfTI.
+
+    Returns:
+        Expected label file path.
+    """
+    stem = input_nifti.name.replace(".nii.gz", "").replace(".nii", "")
+    return labels_dir / f"{stem}_synthseg.nii.gz"
+
+
+def run_synthseg_on_volume(
+    input_nifti: Path,
+    output_label: Path,
+    vol_csv: Path,
     qc_csv: Path,
     command: List[str] | Tuple[str, ...],
     robust: bool = True,
     threads: int = 1,
     crop: int = 0,
 ) -> bool:
-    """Run SynthSeg on a directory of NIfTI volumes.
+    """Run SynthSeg on a single NIfTI volume.
 
     Args:
-        input_dir: Directory containing input ``.nii.gz`` files.
-        labels_dir: Directory for output segmentation label maps.
-        volumes_csv: Path to output CSV with regional volumes.
-        qc_csv: Path to output CSV with QC scores.
+        input_nifti: Path to a single input ``.nii.gz`` file.
+        output_label: Path for the output segmentation label map.
+        vol_csv: Path for the per-volume CSV with regional volumes.
+        qc_csv: Path for the per-volume CSV with QC score.
         command: SynthSeg command prefix.
         robust: Enable robust mode.
         threads: CPU threads (0 = system default).
@@ -400,18 +416,18 @@ def run_synthseg_on_directory(
     Returns:
         True if SynthSeg completed successfully.
     """
-    labels_dir.mkdir(parents=True, exist_ok=True)
-    volumes_csv.parent.mkdir(parents=True, exist_ok=True)
+    output_label.parent.mkdir(parents=True, exist_ok=True)
+    vol_csv.parent.mkdir(parents=True, exist_ok=True)
     qc_csv.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
         *command,
         "--i",
-        str(input_dir),
+        str(input_nifti),
         "--o",
-        str(labels_dir),
+        str(output_label),
         "--vol",
-        str(volumes_csv),
+        str(vol_csv),
         "--qc",
         str(qc_csv),
     ]
@@ -422,37 +438,76 @@ def run_synthseg_on_directory(
     if crop > 0:
         cmd.extend(["--crop", str(crop)])
 
-    logger.info("Running SynthSeg: %s", " ".join(cmd))
+    logger.info("Running SynthSeg on %s", input_nifti.name)
 
     try:
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=7200,
+            timeout=600,  # 10 min per volume (generous)
         )
         if result.returncode != 0:
             logger.error(
-                "SynthSeg failed (rc=%d):\nstdout: %s\nstderr: %s",
+                "SynthSeg failed on %s (rc=%d):\nstderr: %s",
+                input_nifti.name,
                 result.returncode,
-                result.stdout[-500:] if result.stdout else "",
                 result.stderr[-500:] if result.stderr else "",
             )
             return False
-        logger.info("SynthSeg completed successfully for %s", input_dir)
         return True
     except FileNotFoundError:
         logger.error("SynthSeg command not found: %s", command)
         return False
     except subprocess.TimeoutExpired:
-        logger.error("SynthSeg timed out after 2 hours for %s", input_dir)
+        logger.error("SynthSeg timed out on %s", input_nifti.name)
         return False
 
 
-def run_all_synthseg(config: SynthSegEvalConfig) -> Dict[str, bool]:
-    """Run SynthSeg on all exported NIfTI directories.
+def _merge_per_volume_csvs(
+    csv_dir: Path,
+    output_csv: Path,
+) -> None:
+    """Merge individual per-volume SynthSeg CSVs into one combined CSV.
 
-    Skips runs where the volumes CSV already exists (caching/resumability).
+    Args:
+        csv_dir: Directory containing per-volume CSV files.
+        output_csv: Path for the merged output CSV.
+    """
+    csv_files = sorted(csv_dir.glob("*.csv"))
+    if not csv_files:
+        return
+
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read the first CSV to get headers
+    with open(csv_files[0]) as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+
+    if not fieldnames:
+        return
+
+    with open(output_csv, "w", newline="") as out:
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+        for csv_file in csv_files:
+            with open(csv_file) as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    writer.writerow(row)
+
+    logger.info("Merged %d CSVs into %s", len(csv_files), output_csv)
+
+
+def run_all_synthseg(config: SynthSegEvalConfig) -> Dict[str, bool]:
+    """Run SynthSeg on all exported NIfTI volumes with per-volume resumability.
+
+    For each volume, checks if its label map already exists. Skips volumes
+    that were successfully segmented in a previous run, enabling seamless
+    resume after timeouts.
+
+    After processing, merges per-volume CSV outputs into combined CSVs.
 
     Args:
         config: SynthSeg evaluation configuration.
@@ -473,16 +528,15 @@ def run_all_synthseg(config: SynthSegEvalConfig) -> Dict[str, bool]:
 
     results: Dict[str, bool] = {}
 
-    # Build list of (label, input_dir, labels_dir, vol_csv, qc_csv)
-    runs: List[Tuple[str, Path, Path, Path, Path]] = []
+    # Build list of (group_label, input_dir, labels_dir, vol_csv, qc_csv)
+    groups: List[Tuple[str, Path, Path, Path, Path]] = []
 
     for method in config.methods:
         if method == "HR":
-            input_dir = base_nifti / "HR"
-            runs.append(
+            groups.append(
                 (
                     "HR",
-                    input_dir,
+                    base_nifti / "HR",
                     base_labels / "HR",
                     base_volumes / "HR_volumes.csv",
                     base_qc / "HR_qc.csv",
@@ -491,39 +545,79 @@ def run_all_synthseg(config: SynthSegEvalConfig) -> Dict[str, bool]:
         else:
             for spacing in config.spacings:
                 label = f"{method}_{spacing}"
-                input_dir = base_nifti / method / spacing
-                runs.append(
+                groups.append(
                     (
                         label,
-                        input_dir,
+                        base_nifti / method / spacing,
                         base_labels / method / spacing,
-                        base_volumes / f"{method}_{spacing}_volumes.csv",
-                        base_qc / f"{method}_{spacing}_qc.csv",
+                        base_volumes / f"{label}_volumes.csv",
+                        base_qc / f"{label}_qc.csv",
                     )
                 )
 
-    for label, input_dir, labels_dir, vol_csv, qc_csv in runs:
-        if vol_csv.exists():
-            logger.info("SynthSeg results for %s already cached, skipping.", label)
-            results[label] = True
-            continue
-
+    for group_label, input_dir, labels_dir, vol_csv, qc_csv in groups:
         if not input_dir.exists() or not any(input_dir.glob("*.nii.gz")):
-            logger.warning("No NIfTI files for %s in %s, skipping.", label, input_dir)
-            results[label] = False
+            logger.warning(
+                "No NIfTI files for %s in %s, skipping.", group_label, input_dir
+            )
+            results[group_label] = False
             continue
 
-        ok = run_synthseg_on_directory(
-            input_dir=input_dir,
-            labels_dir=labels_dir,
-            volumes_csv=vol_csv,
-            qc_csv=qc_csv,
-            command=list(config.command),
-            robust=config.robust,
-            threads=config.threads,
-            crop=config.crop,
+        input_files = sorted(input_dir.glob("*.nii.gz"))
+        labels_dir.mkdir(parents=True, exist_ok=True)
+
+        # Per-volume staging dirs for individual CSVs
+        vol_staging = config.output_dir / "_staging" / "vol" / group_label
+        qc_staging = config.output_dir / "_staging" / "qc" / group_label
+        vol_staging.mkdir(parents=True, exist_ok=True)
+        qc_staging.mkdir(parents=True, exist_ok=True)
+
+        n_done = 0
+        n_skipped = 0
+        n_failed = 0
+
+        for nii_path in input_files:
+            expected_label = _label_path_for_input(labels_dir, nii_path)
+
+            if expected_label.exists():
+                n_skipped += 1
+                continue
+
+            stem = nii_path.name.replace(".nii.gz", "").replace(".nii", "")
+            per_vol_csv = vol_staging / f"{stem}.csv"
+            per_qc_csv = qc_staging / f"{stem}.csv"
+
+            ok = run_synthseg_on_volume(
+                input_nifti=nii_path,
+                output_label=expected_label,
+                vol_csv=per_vol_csv,
+                qc_csv=per_qc_csv,
+                command=list(config.command),
+                robust=config.robust,
+                threads=config.threads,
+                crop=config.crop,
+            )
+            if ok:
+                n_done += 1
+            else:
+                n_failed += 1
+
+        total = len(input_files)
+        logger.info(
+            "%s: %d/%d done (%d skipped, %d new, %d failed)",
+            group_label,
+            n_skipped + n_done,
+            total,
+            n_skipped,
+            n_done,
+            n_failed,
         )
-        results[label] = ok
+
+        # Merge per-volume CSVs into combined output CSVs
+        _merge_per_volume_csvs(vol_staging, vol_csv)
+        _merge_per_volume_csvs(qc_staging, qc_csv)
+
+        results[group_label] = n_failed == 0
 
     return results
 
