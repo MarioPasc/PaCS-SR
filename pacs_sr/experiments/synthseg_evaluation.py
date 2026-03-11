@@ -628,15 +628,19 @@ def run_all_synthseg(config: SynthSegEvalConfig) -> Dict[str, bool]:
 
 
 def parse_qc_csv(qc_csv: Path) -> Dict[str, float]:
-    """Parse SynthSeg QC CSV into per-subject scores.
+    """Parse SynthSeg QC CSV into per-subject mean scores.
 
-    The QC CSV has columns: ``subject, qc`` (or similar).
+    SynthSeg ``--robust`` outputs per-region QC columns (e.g.
+    ``general white matter``, ``general grey matter``, ...) instead of a
+    single ``qc`` column.  This function handles both formats: if a single
+    ``qc`` column exists it is used directly; otherwise the mean across all
+    numeric region columns is computed.
 
     Args:
         qc_csv: Path to the QC CSV output by SynthSeg ``--qc``.
 
     Returns:
-        Dict mapping ``patient_id → qc_score``.
+        Dict mapping ``patient_id → mean_qc_score``.
     """
     scores: Dict[str, float] = {}
     with open(qc_csv) as f:
@@ -645,11 +649,29 @@ def parse_qc_csv(qc_csv: Path) -> Dict[str, float]:
             subject = row.get("subject", row.get("", ""))
             # Strip path and extension to get patient ID
             subject = Path(subject).stem.replace(".nii", "")
-            qc_val = row.get("qc", row.get("qc_score", ""))
-            try:
-                scores[subject] = float(qc_val)
-            except (ValueError, TypeError):
-                logger.warning("Invalid QC value for %s: %s", subject, qc_val)
+
+            # Try single-column format first
+            qc_val = row.get("qc", row.get("qc_score", None))
+            if qc_val is not None:
+                try:
+                    scores[subject] = float(qc_val)
+                    continue
+                except (ValueError, TypeError):
+                    pass
+
+            # Multi-column (robust) format: average all numeric columns
+            vals: List[float] = []
+            for key, val in row.items():
+                if key in ("subject", ""):
+                    continue
+                try:
+                    vals.append(float(val))
+                except (ValueError, TypeError):
+                    pass
+            if vals:
+                scores[subject] = float(np.mean(vals))
+            else:
+                logger.warning("No valid QC values for %s", subject)
     return scores
 
 
@@ -705,6 +727,18 @@ def compute_dice_per_region(
 
     method_data = np.asarray(nib.load(str(method_label_path)).dataobj, dtype=np.int32)
     hr_data = np.asarray(nib.load(str(hr_label_path)).dataobj, dtype=np.int32)
+
+    # Crop to common minimum shape — SR methods may produce slightly
+    # different output shapes due to resampling/padding differences.
+    if method_data.shape != hr_data.shape:
+        logger.debug(
+            "Shape mismatch: method %s vs HR %s — cropping to common FOV",
+            method_data.shape,
+            hr_data.shape,
+        )
+        min_shape = tuple(min(m, h) for m, h in zip(method_data.shape, hr_data.shape))
+        method_data = method_data[: min_shape[0], : min_shape[1], : min_shape[2]]
+        hr_data = hr_data[: min_shape[0], : min_shape[1], : min_shape[2]]
 
     dices: Dict[str, float] = {}
     for name, lid in label_map.items():

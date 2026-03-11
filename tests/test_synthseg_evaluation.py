@@ -192,6 +192,26 @@ class TestDiceComputation:
         assert "mean" in dices
         assert len(dices) == 2  # 1 region + mean
 
+    def test_shape_mismatch_crops_to_common(self, tmp_path: Path) -> None:
+        """Dice handles label maps with different shapes by cropping."""
+        affine = np.eye(4)
+        # Label A: 32x32x32
+        labels_a = np.zeros((32, 32, 32), dtype=np.int32)
+        labels_a[:16, :, :] = 3
+        # Label B: 32x32x30 (smaller last dim)
+        labels_b = np.zeros((32, 32, 30), dtype=np.int32)
+        labels_b[:16, :, :] = 3
+
+        path_a = tmp_path / "shape_a.nii.gz"
+        path_b = tmp_path / "shape_b.nii.gz"
+        nib.save(nib.Nifti1Image(labels_a, affine), str(path_a))
+        nib.save(nib.Nifti1Image(labels_b, affine), str(path_b))
+
+        subset = {"Left-Cerebral-Cortex": 3}
+        dices = compute_dice_per_region(path_a, path_b, label_map=subset)
+        # Should succeed (not raise) and give high Dice since labels overlap
+        assert dices["Left-Cerebral-Cortex"] > 0.9
+
 
 # ---------------------------------------------------------------------------
 # Volume error tests
@@ -248,6 +268,31 @@ class TestCSVParsing:
         assert "P1-t1c" in volumes
         assert volumes["P1-t1c"]["Left-Hippocampus"] == pytest.approx(3200.5)
         assert volumes["P2-t1c"]["Right-Hippocampus"] == pytest.approx(3050.8)
+
+    def test_parse_qc_csv_robust_multicolumn(self, tmp_path: Path) -> None:
+        """SynthSeg --robust outputs per-region QC columns, not a single 'qc'."""
+        csv_path = tmp_path / "qc_robust.csv"
+        fieldnames = [
+            "subject",
+            "general white matter",
+            "general grey matter",
+            "general csf",
+            "cerebellum",
+        ]
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "subject": "P1-t1c.nii.gz",
+                    "general white matter": "0.8",
+                    "general grey matter": "0.7",
+                    "general csf": "0.9",
+                    "cerebellum": "0.8",
+                }
+            )
+        scores = parse_qc_csv(csv_path)
+        assert scores["P1-t1c"] == pytest.approx(0.8)  # mean of 0.8, 0.7, 0.9, 0.8
 
     def test_parse_nonexistent_csv(self, tmp_path: Path) -> None:
         from pacs_sr.experiments.synthseg_evaluation import _safe_parse_qc
