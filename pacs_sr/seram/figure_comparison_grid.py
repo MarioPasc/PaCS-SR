@@ -356,6 +356,132 @@ def _find_weight_npz(
 
 
 # ---------------------------------------------------------------------------
+# Patient selection (best-case / worst-case)
+# ---------------------------------------------------------------------------
+
+
+def select_comparison_patient(
+    source_h5: Path,
+    experts_dir: Path,
+    out_root: Path,
+    experiment_name: str,
+    n_folds: int,
+    spacings: List[str],
+    models: List[str],
+    pulse: str,
+    mode: str = "best-case",
+) -> str:
+    """Select a patient for comparison grid based on MAE advantage.
+
+    Computes per-patient, per-spacing mean brain MAE for each expert and
+    PaCS-SR, then scores patients by PaCS-SR advantage (lower MAE = better).
+
+    Modes:
+        ``"best-case"``: Patient where PaCS-SR has the smallest MAE
+            disadvantage (or largest advantage) vs the best expert.
+        ``"worst-case"``: Patient where PaCS-SR has the largest MAE
+            disadvantage vs the best expert.
+
+    Args:
+        source_h5: Path to source_data.h5.
+        experts_dir: Directory containing {model}.h5 files.
+        out_root: PaCS-SR output root.
+        experiment_name: Experiment name.
+        n_folds: Number of folds.
+        spacings: Spacing strings.
+        models: Expert model names.
+        pulse: MRI pulse sequence.
+        mode: ``"best-case"`` or ``"worst-case"``.
+
+    Returns:
+        Patient ID.
+    """
+    patients = list_groups(source_h5, "high_resolution")
+
+    # Pre-filter to patients that have blends at all spacings
+    candidates: List[str] = []
+    for pid in patients:
+        if all(
+            _find_blend_h5(pid, sp, pulse, out_root, experiment_name, n_folds)[0]
+            is not None
+            for sp in spacings
+        ):
+            candidates.append(pid)
+    LOG.info(
+        "Scoring %d/%d patients for %s selection (pulse=%s)",
+        len(candidates),
+        len(patients),
+        mode,
+        pulse,
+    )
+
+    scored: List[Tuple[str, float]] = []
+    for i, pid in enumerate(candidates):
+        LOG.info("  [%d/%d] Scoring %s...", i + 1, len(candidates), pid)
+        # Load HR volume
+        hk = hr_key(pid, pulse)
+        if not has_key(source_h5, hk):
+            continue
+        gt_raw, gt_aff = read_volume(source_h5, hk)
+        gt_vol, _ = _reorient_to_ras(gt_raw, gt_aff)
+        brain_mask = gt_vol > gt_vol.max() * 0.05
+
+        spacing_advantages: List[float] = []
+        for spacing in spacings:
+            # Expert MAEs
+            expert_maes: List[float] = []
+            for m in models:
+                mh5 = expert_h5_path(experts_dir, m)
+                ek = expert_key(spacing, pid, pulse)
+                if not has_key(mh5, ek):
+                    break
+                ev, ea = read_volume(mh5, ek)
+                ev_ras, _ = _reorient_to_ras(ev, ea)
+                # Handle shape mismatch
+                if ev_ras.shape != gt_vol.shape:
+                    fac = tuple(g / e for g, e in zip(gt_vol.shape, ev_ras.shape))
+                    ev_ras = zoom(ev_ras, fac, order=3)
+                expert_maes.append(float(np.abs(ev_ras - gt_vol)[brain_mask].mean()))
+
+            if len(expert_maes) != len(models):
+                break
+
+            # PaCS-SR MAE
+            bh5, _ = _find_blend_h5(
+                pid, spacing, pulse, out_root, experiment_name, n_folds
+            )
+            if bh5 is None:
+                break
+            bv, ba = read_volume(bh5, blend_key(spacing, pid, pulse))
+            bv_ras, _ = _reorient_to_ras(bv, ba)
+            if bv_ras.shape != gt_vol.shape:
+                fac = tuple(g / e for g, e in zip(gt_vol.shape, bv_ras.shape))
+                bv_ras = zoom(bv_ras, fac, order=3)
+            pacs_mae = float(np.abs(bv_ras - gt_vol)[brain_mask].mean())
+
+            # advantage = best_expert_mae - pacs_mae (positive = PaCS-SR better)
+            spacing_advantages.append(min(expert_maes) - pacs_mae)
+
+        if len(spacing_advantages) != len(spacings):
+            continue
+
+        avg_advantage = float(np.mean(spacing_advantages))
+        # best-case: maximize advantage (PaCS-SR has lowest MAE relative to experts)
+        # worst-case: minimize advantage (PaCS-SR has highest MAE relative to experts)
+        score = avg_advantage if mode == "best-case" else -avg_advantage
+        scored.append((pid, score))
+
+    if not scored:
+        LOG.error("No valid patients found for %s selection", mode)
+        return ""
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    best_pid, best_score = scored[0]
+    LOG.info("Selected %s patient: %s (score=%.6f)", mode, best_pid, best_score)
+    return best_pid
+
+
+# ---------------------------------------------------------------------------
 # Main grid generation
 # ---------------------------------------------------------------------------
 
@@ -430,13 +556,16 @@ def generate_comparison_grid(
         col_map.append(model_cols)
 
     total_gcols = len(width_ratios)
-    fig = plt.figure(figsize=(PLOT_SETTINGS["figure_width_double"], n_rows * 1.6))
+    fig = plt.figure(
+        figsize=(PLOT_SETTINGS["figure_width_double"], n_rows * 1.45),
+        facecolor="black",
+    )
     gs = GridSpec(
         n_rows,
         total_gcols,
         figure=fig,
         width_ratios=width_ratios,
-        hspace=0.0,
+        hspace=0.04,
         wspace=0.04,
     )
 
@@ -618,6 +747,11 @@ def generate_comparison_grid(
             ax_sr = fig.add_subplot(gs[row_idx, gcols[0]])
             ax_mae = fig.add_subplot(gs[row_idx, gcols[1]])
 
+            for ax in (ax_sr, ax_mae):
+                ax.set_facecolor("black")
+                for spine in ax.spines.values():
+                    spine.set_visible(False)
+
             ax_sr.imshow(
                 sr_norm, cmap="gray", vmin=0, vmax=1, origin="lower", aspect="equal"
             )
@@ -644,6 +778,9 @@ def generate_comparison_grid(
             # Weight map column
             if model_name == "PaCS-SR" and showcase_weight_maps and len(gcols) == 3:
                 ax_wm = fig.add_subplot(gs[row_idx, gcols[2]])
+                ax_wm.set_facecolor("black")
+                for spine in ax_wm.spines.values():
+                    spine.set_visible(False)
                 if weight_slice is not None:
                     eclare_idx = min(1, weight_slice.shape[-1] - 1)
                     wm_disp = weight_slice[:, :, eclare_idx]
@@ -673,14 +810,22 @@ def generate_comparison_grid(
                 ax_wm.set_yticks([])
                 if row_idx == 0:
                     ax_wm.set_title(
-                        "Weights", fontsize=PLOT_SETTINGS["annotation_fontsize"]
+                        "Weights",
+                        fontsize=PLOT_SETTINGS["annotation_fontsize"],
+                        color="white",
                     )
 
             if row_idx == 0:
                 ax_sr.set_title(
-                    f"{model_name}", fontsize=PLOT_SETTINGS["tick_labelsize"]
+                    f"{model_name}",
+                    fontsize=PLOT_SETTINGS["tick_labelsize"],
+                    color="white",
                 )
-                ax_mae.set_title("MAE", fontsize=PLOT_SETTINGS["annotation_fontsize"])
+                ax_mae.set_title(
+                    "MAE",
+                    fontsize=PLOT_SETTINGS["annotation_fontsize"],
+                    color="white",
+                )
             if col_idx == 0:
                 ax_sr.set_ylabel(
                     spacing,
@@ -688,12 +833,18 @@ def generate_comparison_grid(
                     rotation=0,
                     labelpad=30,
                     va="center",
+                    color="white",
                 )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     for ext in ("pdf", "png"):
         save_path = out_path.with_suffix(f".{ext}")
-        fig.savefig(save_path, dpi=PLOT_SETTINGS["dpi_print"], bbox_inches="tight")
+        fig.savefig(
+            save_path,
+            dpi=PLOT_SETTINGS["dpi_print"],
+            bbox_inches="tight",
+            facecolor="black",
+        )
         LOG.info("Saved %s", save_path)
     plt.close(fig)
     return slice_z
@@ -702,6 +853,46 @@ def generate_comparison_grid(
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
+
+def _run_grid_for_patient(
+    patient_id: str,
+    data: object,
+    pacs_sr_cfg: object,
+    n_folds: int,
+    out_dir: Path,
+    suffix: str,
+    args: argparse.Namespace,
+) -> None:
+    """Generate comparison grid for a single patient across all pulses."""
+    seg_path = None
+    if args.seg_dir is not None:
+        seg_path = args.seg_dir / patient_id / f"{patient_id}-seg.nii.gz"
+
+    shared_slice_z: Optional[int] = None
+    for pulse in pacs_sr_cfg.pulses:
+        fname = f"figure1_{pulse}{suffix}"
+        used_z = generate_comparison_grid(
+            source_h5=data.source_h5,
+            experts_dir=data.experts_dir,
+            out_root=Path(pacs_sr_cfg.out_root),
+            experiment_name=pacs_sr_cfg.experiment_name,
+            n_folds=n_folds,
+            spacings=list(pacs_sr_cfg.spacings),
+            models=list(pacs_sr_cfg.models),
+            pulse=pulse,
+            patient_id=patient_id,
+            out_path=out_dir / f"{fname}.pdf",
+            seg_path=seg_path,
+            showcase_weight_maps=args.showcase_weight_maps,
+            slice_range=tuple(args.slice_range) if args.slice_range else None,
+            tumor_slices=args.tumor_slices,
+            show_tumor_contours=args.show_tumor_contours,
+            fixed_slice_z=shared_slice_z,
+        )
+        if shared_slice_z is None:
+            shared_slice_z = used_z
+            LOG.info("Shared slice z=%d (from first pulse %s)", used_z, pulse)
 
 
 def main() -> None:
@@ -746,6 +937,12 @@ def main() -> None:
         default=False,
         help="Draw tumour label contour lines on the SR images",
     )
+    parser.add_argument(
+        "--selection-mode",
+        choices=["default", "best-case", "worst-case", "all"],
+        default="default",
+        help="Patient selection: default (first/--patient-id), best-case, worst-case, or all",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -756,47 +953,47 @@ def main() -> None:
 
     full = load_full_config(args.config)
     data = full.data
-    pacs_sr = full.pacs_sr
+    pacs_sr_cfg = full.pacs_sr
 
-    out_dir = Path(pacs_sr.out_root) / pacs_sr.experiment_name / "figures"
+    out_dir = Path(pacs_sr_cfg.out_root) / pacs_sr_cfg.experiment_name / "figures"
     n_folds = data.kfolds
+    ref_pulse = pacs_sr_cfg.pulses[0]
 
-    patient_id = args.patient_id
-    if patient_id is None:
-        patients = list_groups(data.source_h5, "high_resolution")
-        if patients:
-            patient_id = patients[0]
-    if patient_id is None:
-        LOG.error("No patients found")
-        return
-
-    seg_path = None
-    if args.seg_dir is not None:
-        seg_path = args.seg_dir / patient_id / f"{patient_id}-seg.nii.gz"
-
-    shared_slice_z: Optional[int] = None
-    for pulse in pacs_sr.pulses:
-        used_z = generate_comparison_grid(
-            source_h5=data.source_h5,
-            experts_dir=data.experts_dir,
-            out_root=Path(pacs_sr.out_root),
-            experiment_name=pacs_sr.experiment_name,
-            n_folds=n_folds,
-            spacings=list(pacs_sr.spacings),
-            models=list(pacs_sr.models),
-            pulse=pulse,
-            patient_id=patient_id,
-            out_path=out_dir / f"figure1_{pulse}.pdf",
-            seg_path=seg_path,
-            showcase_weight_maps=args.showcase_weight_maps,
-            slice_range=tuple(args.slice_range) if args.slice_range else None,
-            tumor_slices=args.tumor_slices,
-            show_tumor_contours=args.show_tumor_contours,
-            fixed_slice_z=shared_slice_z,
+    if args.selection_mode == "default":
+        patient_id = args.patient_id
+        if patient_id is None:
+            patients = list_groups(data.source_h5, "high_resolution")
+            if patients:
+                patient_id = patients[0]
+        if patient_id is None:
+            LOG.error("No patients found")
+            return
+        _run_grid_for_patient(patient_id, data, pacs_sr_cfg, n_folds, out_dir, "", args)
+    else:
+        modes = (
+            ["best-case", "worst-case"]
+            if args.selection_mode == "all"
+            else [args.selection_mode]
         )
-        if shared_slice_z is None:
-            shared_slice_z = used_z
-            LOG.info("Shared slice z=%d (from first pulse %s)", used_z, pulse)
+        for mode in modes:
+            pid = select_comparison_patient(
+                source_h5=data.source_h5,
+                experts_dir=data.experts_dir,
+                out_root=Path(pacs_sr_cfg.out_root),
+                experiment_name=pacs_sr_cfg.experiment_name,
+                n_folds=n_folds,
+                spacings=list(pacs_sr_cfg.spacings),
+                models=list(pacs_sr_cfg.models),
+                pulse=ref_pulse,
+                mode=mode,
+            )
+            if not pid:
+                LOG.error("No patient found for %s", mode)
+                continue
+            LOG.info("Generating %s grid for patient %s", mode, pid)
+            _run_grid_for_patient(
+                pid, data, pacs_sr_cfg, n_folds, out_dir, f"_{mode}", args
+            )
 
 
 if __name__ == "__main__":
