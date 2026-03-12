@@ -104,6 +104,43 @@ def main():
     print(f"Output root: {pacs_sr_config.out_root}")
     print("=" * 80)
 
+    # Save experiment metadata (environment + config snapshot)
+    from pacs_sr.utils.logger import capture_environment
+    from pacs_sr.model.model import _config_to_dict
+
+    out_dir = Path(pacs_sr_config.out_root) / pacs_sr_config.experiment_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    experiment_meta = {
+        "environment": capture_environment(),
+        "config_file": str(args.config),
+        "data_config": {
+            "source_h5": str(data_config.source_h5),
+            "experts_dir": str(data_config.experts_dir),
+            "spacings": list(data_config.spacings),
+            "pulses": list(data_config.pulses),
+            "models": list(data_config.models),
+            "kfolds": data_config.kfolds,
+            "seed": data_config.seed,
+        },
+        "pacs_sr_config": _config_to_dict(pacs_sr_config),
+        "cli_args": {
+            "fold": args.fold,
+            "spacing": args.spacing,
+            "pulse": args.pulse,
+        },
+        "folds_to_train": [f + 1 for f in folds_to_train],
+        "spacings_to_train": spacings_to_train,
+        "pulses_to_train": pulses_to_train,
+        "n_folds": len(full_manifest["folds"]),
+        "manifest_path": str(manifest_path),
+    }
+
+    meta_path = out_dir / "experiment_metadata.json"
+    with open(meta_path, "w") as f:
+        json.dump(experiment_meta, f, indent=2)
+    print(f"Saved experiment metadata: {meta_path}")
+
     # Train each fold
     total_tasks = len(folds_to_train) * len(spacings_to_train) * len(pulses_to_train)
     task_idx = 0

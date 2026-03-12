@@ -1,8 +1,18 @@
+"""Core PaCS-SR model: patchwise convex stacking for 3D MRI super-resolution.
+
+This module implements the PatchwiseConvexStacker class which learns
+region-specific expert weights by solving constrained quadratic programs
+per tile, then blends expert predictions using overlap-add with windowing.
+"""
+
 from __future__ import annotations
+
 import json
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from scipy.optimize import minimize
@@ -30,10 +40,34 @@ from pacs_sr.utils.zscore import zscore, inverse_zscore, ZScoreParams
 from pacs_sr.utils.registration import register_and_mask, apply_brain_mask
 from pacs_sr.model.metrics import psnr, ssim3d_slicewise, mae, mse
 from pacs_sr.model.regularization import laplacian_smooth_weights
-from pacs_sr.utils.logger import PacsSRLogger
+from pacs_sr.utils.logger import PacsSRLogger, capture_environment
 from pacs_sr.utils.weight_maps import weights_dict_to_npz
 
 Array = np.ndarray
+
+
+def _config_to_dict(cfg: Any) -> Dict[str, Any]:
+    """Convert a dataclass config to a JSON-serializable dict.
+
+    Handles Path, tuple, and other non-serializable types by converting
+    them to strings or lists respectively.
+
+    Args:
+        cfg: A frozen dataclass config instance (e.g. PacsSRConfig).
+
+    Returns:
+        Dictionary with all fields converted to JSON-compatible types.
+    """
+    d: Dict[str, Any] = {}
+    for field_name in vars(cfg):
+        val = getattr(cfg, field_name)
+        if isinstance(val, Path):
+            d[field_name] = str(val)
+        elif isinstance(val, tuple):
+            d[field_name] = list(val)
+        else:
+            d[field_name] = val
+    return d
 
 
 @dataclass(frozen=True)
@@ -136,6 +170,16 @@ def _tile_window(sz: tuple[int, int, int], kind: str) -> Array:
 
 
 def _compute_edge_weights(hr: Array, lam_edge: float, edge_power: float) -> Array:
+    """Compute spatially-varying edge emphasis weights from the HR volume.
+
+    Args:
+        hr: High-resolution volume.
+        lam_edge: Edge emphasis strength. If <= 0, returns uniform weights.
+        edge_power: Power applied to normalized gradient magnitude.
+
+    Returns:
+        Float32 weight array of same shape as hr.
+    """
     if lam_edge <= 0:
         return np.ones_like(hr, dtype=np.float32)
     # Sobel gradients per axis
@@ -322,9 +366,20 @@ def _reduce_region_stats(
     return region_ids, Qs, Bs, counts
 
 
-def _solve_simplex_qp(Q: Array, B: Array, lambda_ridge: float, simplex: bool) -> Array:
-    """
-    Solve min_w w^T(Q+λI)w - 2 b^T w with optional simplex constraints.
+def _solve_simplex_qp(
+    Q: Array, B: Array, lambda_ridge: float, simplex: bool
+) -> Tuple[Array, Dict[str, Any]]:
+    """Solve min_w w^T(Q+lI)w - 2 b^T w with optional simplex constraints.
+
+    Args:
+        Q: Quadratic form matrix (M, M).
+        B: Linear term vector (M,).
+        lambda_ridge: Ridge regularization coefficient.
+        simplex: If True, enforce non-negativity and sum-to-one constraints.
+
+    Returns:
+        Tuple of (w, solver_info) where w is the solution vector (float32)
+        and solver_info is a dict with solver metadata.
     """
     M = Q.shape[0]
     Qr = Q + lambda_ridge * np.eye(M, dtype=Q.dtype)
@@ -357,13 +412,29 @@ def _solve_simplex_qp(Q: Array, B: Array, lambda_ridge: float, simplex: bool) ->
         w[w < 0] = 0.0
         s = w.sum()
         w = (np.ones_like(w) / M) if s <= 0 else (w / s)
+        solver_info: Dict[str, Any] = {
+            "method": "SLSQP",
+            "success": bool(res.success),
+            "nit": int(res.nit),
+            "objective": float(fun(w)),
+            "message": str(res.message),
+        }
     else:
         # unconstrained quadratic; closed form w = Q^{-1} B
+        message = "direct_solve"
         try:
             w = np.linalg.solve(Qr, B)
         except np.linalg.LinAlgError:
             w = np.linalg.pinv(Qr) @ B
-    return w.astype(np.float32)
+            message = "pseudoinverse_fallback"
+        solver_info = {
+            "method": "closed_form",
+            "success": True,
+            "nit": 0,
+            "objective": float(w @ Qr @ w - 2.0 * B @ w),
+            "message": message,
+        }
+    return w.astype(np.float32), solver_info
 
 
 class PatchwiseConvexStacker:
@@ -417,6 +488,14 @@ class PatchwiseConvexStacker:
     def _labels_for_shape(
         self, shape: Tuple[int, int, int]
     ) -> Tuple[np.ndarray, List[int]]:
+        """Return region labels and sorted region IDs for a given volume shape.
+
+        Args:
+            shape: 3-tuple (Z, Y, X) of volume dimensions.
+
+        Returns:
+            Tuple of (labels array, list of region IDs).
+        """
         key = (shape[0], shape[1], shape[2], self.cfg.patch_size, self.cfg.stride)
         if key not in self.labels_cache_:
             labels = region_labels(shape, self.cfg.patch_size, self.cfg.stride)
@@ -429,6 +508,7 @@ class PatchwiseConvexStacker:
         self, manifest: Dict, spacing: str, pulse: str
     ) -> Dict[int, np.ndarray]:
         """Fit the regional weights on training patients for one (spacing, pulse)."""
+        total_start = time.time()
         patient_ids = list(manifest["train"])
         n_patients = len(patient_ids)
 
@@ -471,6 +551,9 @@ class PatchwiseConvexStacker:
         # SLURM allocation: 16 GB, but ~1-2 GB used by system/base process
         # Safe usable: ~14 GB
 
+        # Default for training_record in case psutil is unavailable
+        gb_per_worker = 1.5
+
         try:
             import psutil
 
@@ -506,12 +589,12 @@ class PatchwiseConvexStacker:
             )
             if self.cfg.use_registration and self.cfg.atlas_dir is not None:
                 memory_based_workers = 4  # Very safe for registration
+                gb_per_worker = 2.5
             else:
                 memory_based_workers = 8  # Safe default without registration
+                gb_per_worker = 1.5
 
         # Allow manual override via environment variable for debugging/tuning
-        import os
-
         if "PACS_SR_MAX_WORKERS" in os.environ:
             try:
                 manual_max_workers = int(os.environ["PACS_SR_MAX_WORKERS"])
@@ -554,12 +637,14 @@ class PatchwiseConvexStacker:
             for pid in patient_ids
         ]
 
+        # --- Stats accumulation phase (timed) ---
+        stats_start = time.time()
+
         # Execute with OOM protection: try parallel first, fallback to serial on OOM
         try:
             # Execute parallel processing with or without tqdm
             if self.cfg.disable_tqdm:
                 # SLURM-friendly: parallel processing with periodic logging
-                import time
                 from joblib import delayed
 
                 self.logger.info(
@@ -584,7 +669,6 @@ class PatchwiseConvexStacker:
                 )
             else:
                 # Interactive mode: parallel processing with tqdm progress bar
-                import time
                 from joblib import delayed
 
                 with backend.parallel_context(batch_size="auto") as parallel:
@@ -611,7 +695,7 @@ class PatchwiseConvexStacker:
                     f"Memory at failure: {mem.used / (1024**3):.1f}GB used / "
                     f"{mem.total / (1024**3):.1f}GB total ({mem.percent:.1f}% utilization)"
                 )
-            except:
+            except Exception:
                 mem_diag = "Memory diagnostics unavailable"
 
             self.logger.warning(
@@ -619,8 +703,6 @@ class PatchwiseConvexStacker:
                 f"Error details: {error_msg[:200]}\n"
                 f"Falling back to serial processing to ensure completion..."
             )
-
-            import time
 
             patient_start_time = time.time()
             stats_list_raw = []
@@ -659,22 +741,40 @@ class PatchwiseConvexStacker:
         # Cleanup backend resources
         backend.cleanup()
 
+        stats_elapsed = time.time() - stats_start
+
         region_ids, Qs, Bs, counts = _reduce_region_stats(stats_list, M)
 
-        # solve per-region
+        # --- Optimization phase (timed) ---
+        opt_start = time.time()
+
         self.logger.info("\nOptimizing weights per region...")
         W = np.zeros((len(region_ids), M), dtype=np.float32)
+        solver_infos: List[Dict[str, Any]] = []
         for i, rid in enumerate(region_ids):
             if counts[i] == 0:
                 W[i] = np.ones(M, dtype=np.float32) / M
+                solver_infos.append(
+                    {
+                        "method": "uniform_fallback",
+                        "success": True,
+                        "nit": 0,
+                        "objective": 0.0,
+                        "message": "zero_voxels",
+                    }
+                )
                 continue
-            w = _solve_simplex_qp(Qs[i], Bs[i], self.cfg.lambda_ridge, self.cfg.simplex)
+            w, info = _solve_simplex_qp(
+                Qs[i], Bs[i], self.cfg.lambda_ridge, self.cfg.simplex
+            )
             W[i] = w.astype(np.float32)
+            solver_infos.append(info)
 
             # Log region optimization based on configured frequency
             if i % self.cfg.log_region_freq == 0 or i == len(region_ids) - 1:
-                obj_val = float(w @ Qs[i] @ w - 2.0 * Bs[i] @ w)
-                self.logger.log_region_optimization(rid, w.tolist(), obj_val)
+                self.logger.log_region_optimization(rid, w.tolist(), info["objective"])
+
+        opt_elapsed = time.time() - opt_start
 
         # optional Laplacian smoothing
         if self.cfg.laplacian_tau > 0:
@@ -699,6 +799,85 @@ class PatchwiseConvexStacker:
 
         # Log training summary
         self.logger.log_training_summary(n_regions, spacing, pulse)
+
+        total_elapsed = time.time() - total_start
+
+        # --- Build and save comprehensive training record ---
+        objectives = np.array(
+            [si["objective"] for si in solver_infos], dtype=np.float64
+        )
+        solver_nits = np.array([si["nit"] for si in solver_infos], dtype=np.float64)
+        solver_successes = np.array(
+            [si["success"] for si in solver_infos], dtype=np.float64
+        )
+
+        training_record: Dict[str, Any] = {
+            # Environment & config snapshot
+            "environment": capture_environment(),
+            "config": _config_to_dict(self.cfg),
+            "fold_num": self.fold_num,
+            "spacing": spacing,
+            "pulse": pulse,
+            # Data summary
+            "n_train_patients": n_patients,
+            "patient_ids": patient_ids,
+            "n_skipped_patients": n_skipped,
+            "volume_shape": list(shape),
+            "n_regions": len(region_ids),
+            # Per-region results (ALL regions)
+            "regions": {
+                str(rid): {
+                    "weights": W[i].tolist(),
+                    "voxel_count": int(counts[i]),
+                    "objective": float(solver_infos[i]["objective"]),
+                    "solver_nit": solver_infos[i]["nit"],
+                    "solver_success": solver_infos[i]["success"],
+                    "solver_method": solver_infos[i]["method"],
+                }
+                for i, rid in enumerate(region_ids)
+            },
+            # Aggregate optimization statistics
+            "optimization_summary": {
+                "total_regions": len(region_ids),
+                "total_voxels": int(counts.sum()),
+                "mean_objective": float(np.mean(objectives)),
+                "std_objective": float(np.std(objectives)),
+                "min_objective": float(np.min(objectives)),
+                "max_objective": float(np.max(objectives)),
+                "median_objective": float(np.median(objectives)),
+                "mean_solver_iterations": float(np.mean(solver_nits)),
+                "solver_success_rate": float(np.mean(solver_successes)),
+                "mean_voxels_per_region": float(np.mean(counts)),
+                "std_voxels_per_region": float(np.std(counts)),
+            },
+            # Timing
+            "timing": {
+                "stats_accumulation_seconds": stats_elapsed,
+                "optimization_seconds": opt_elapsed,
+                "total_training_seconds": total_elapsed,
+                "avg_seconds_per_patient": (
+                    stats_elapsed / n_patients if n_patients > 0 else 0
+                ),
+            },
+            # Memory
+            "memory": {
+                "effective_workers": effective_workers,
+                "requested_workers": self.cfg.num_workers,
+                "gb_per_worker": gb_per_worker,
+            },
+        }
+
+        # Save training record (same directory as weights.json)
+        base_dir = Path(self.cfg.out_root) / self.cfg.experiment_name / spacing
+        if self.fold_num is not None:
+            record_dir = base_dir / "model_data" / f"fold_{self.fold_num}" / pulse
+        else:
+            record_dir = base_dir / "model_data" / pulse
+        record_dir.mkdir(parents=True, exist_ok=True)
+        record_path = record_dir / "training_record.json"
+        with open(record_path, "w") as f:
+            json.dump(training_record, f, indent=2)
+        self.logger.info(f"Saved training record: {record_path}")
 
         return wdict
 
@@ -850,6 +1029,10 @@ class PatchwiseConvexStacker:
 
         Blends are saved to results_fold_{N}.h5 via write_volume.
         Small metadata (metrics.json, weights.json) stays as files.
+
+        Returns:
+            Dictionary with 'train' and 'test' keys mapping to aggregate
+            metric dicts (backward compatible).
         """
         # Results HDF5 for this fold
         res_h5 = results_h5_path(
@@ -864,7 +1047,8 @@ class PatchwiseConvexStacker:
             model_data_dir = base_dir / "model_data" / pulse
         model_data_dir.mkdir(parents=True, exist_ok=True)
 
-        results = {}
+        results: Dict[str, Any] = {}
+        detailed_results: Dict[str, Any] = {}
         wdict = self.weights_[(spacing, pulse)]
 
         # --- Train set evaluation (optional) ---
@@ -873,7 +1057,8 @@ class PatchwiseConvexStacker:
             n_train = len(train_pids)
             self.logger.log_evaluation_start(spacing, pulse, "train", n_train)
 
-            train_metrics = []
+            train_metrics: List[Dict[str, float]] = []
+            train_patient_results: List[Dict[str, Any]] = []
             iterator = (
                 train_pids
                 if self.cfg.disable_tqdm
@@ -883,8 +1068,6 @@ class PatchwiseConvexStacker:
                     unit="patient",
                 )
             )
-            import time
-
             eval_start_time = time.time()
 
             for idx, pid in enumerate(iterator):
@@ -893,6 +1076,14 @@ class PatchwiseConvexStacker:
                     pred, affine, hr, metrics = self._eval_patient(pid, spacing, pulse)
                     train_metrics.append(metrics)
                     patient_time = time.time() - patient_start
+
+                    train_patient_results.append(
+                        {
+                            "patient_id": pid,
+                            **metrics,
+                            "time_seconds": patient_time,
+                        }
+                    )
 
                     if idx % 10 == 0 or idx == n_train - 1:
                         self.logger.log_patient_metrics(
@@ -908,9 +1099,19 @@ class PatchwiseConvexStacker:
                     continue
 
             if train_metrics:
-                results["train"] = {
+                agg = {
                     k: float(np.mean([m[k] for m in train_metrics]))
                     for k in train_metrics[0]
+                }
+                std = {
+                    k: float(np.std([m[k] for m in train_metrics]))
+                    for k in train_metrics[0]
+                }
+                results["train"] = agg
+                detailed_results["train"] = {
+                    "aggregate": agg,
+                    "std": std,
+                    "per_patient": train_patient_results,
                 }
                 self.logger.log_aggregate_metrics(
                     "train", results["train"], spacing, pulse
@@ -925,7 +1126,8 @@ class PatchwiseConvexStacker:
         n_test = len(test_pids)
         self.logger.log_evaluation_start(spacing, pulse, "test", n_test)
 
-        test_metrics = []
+        test_metrics: List[Dict[str, float]] = []
+        test_patient_results: List[Dict[str, Any]] = []
         volume_shape = None
         iterator = (
             test_pids
@@ -934,8 +1136,6 @@ class PatchwiseConvexStacker:
                 test_pids, desc=f"Evaluating test ({spacing}, {pulse})", unit="patient"
             )
         )
-        import time
-
         eval_start_time = time.time()
 
         for idx, pid in enumerate(iterator):
@@ -944,6 +1144,14 @@ class PatchwiseConvexStacker:
                 pred, affine, hr, metrics = self._eval_patient(pid, spacing, pulse)
                 test_metrics.append(metrics)
                 patient_time = time.time() - patient_start
+
+                test_patient_results.append(
+                    {
+                        "patient_id": pid,
+                        **metrics,
+                        "time_seconds": patient_time,
+                    }
+                )
 
                 if volume_shape is None:
                     volume_shape = hr.shape[:3]
@@ -990,13 +1198,23 @@ class PatchwiseConvexStacker:
 
         # Aggregate test metrics
         if test_metrics:
-            results["test"] = {
+            agg = {
                 k: float(np.mean([m[k] for m in test_metrics])) for k in test_metrics[0]
+            }
+            std = {
+                k: float(np.std([m[k] for m in test_metrics])) for k in test_metrics[0]
+            }
+            results["test"] = agg
+            detailed_results["test"] = {
+                "aggregate": agg,
+                "std": std,
+                "per_patient": test_patient_results,
             }
             self.logger.log_aggregate_metrics("test", results["test"], spacing, pulse)
         else:
             self.logger.warning("No test metrics to aggregate (empty test set)")
             results["test"] = {}
+            detailed_results["test"] = {}
 
         # Save weights dictionary as JSON (small, human-readable)
         weights_json_path = model_data_dir / "weights.json"
@@ -1004,10 +1222,10 @@ class PatchwiseConvexStacker:
             json.dump({str(r): w.tolist() for r, w in wdict.items()}, f, indent=2)
         self.logger.info(f"\nSaved weight dictionary (JSON): {weights_json_path}")
 
-        # Save metrics summary
+        # Save detailed metrics (per-patient breakdown + aggregates + std)
         metrics_path = model_data_dir / "metrics.json"
         with open(metrics_path, "w") as f:
-            json.dump(results, f, indent=2)
+            json.dump(detailed_results, f, indent=2)
         self.logger.info(f"Saved metrics summary: {metrics_path}")
 
         return results

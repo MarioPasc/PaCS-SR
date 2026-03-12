@@ -6,14 +6,14 @@ This module provides comprehensive logging capabilities including:
 - Real-time training progress tracking
 - Validation and test metrics reporting
 - Formatted output for better readability
+- Environment snapshot capture for reproducibility
 """
 
 import logging
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 from datetime import datetime
-import json
 
 
 class PacsSRLogger:
@@ -33,8 +33,7 @@ class PacsSRLogger:
 
         # Create formatter
         formatter = logging.Formatter(
-            "%(asctime)s | %(levelname)-8s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
+            "%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
 
         # Console handler
@@ -59,7 +58,9 @@ class PacsSRLogger:
         self.logger.info("=" * 80)
         self.logger.info("PaCS-SR: Patchwise Convex Stacking for Super-Resolution")
         self.logger.info("=" * 80)
-        self.logger.info(f"Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.logger.info(
+            f"Session started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
 
     def log_config(self, config: Any):
         """
@@ -88,7 +89,7 @@ class PacsSRLogger:
             "Metrics": ["compute_lpips", "ssim_axis"],
             "Saving": ["save_weight_volumes", "save_blends"],
             "Data": ["spacings", "pulses", "models"],
-            "Paths": ["cv_json", "out_root"]
+            "Paths": ["cv_json", "out_root"],
         }
 
         for category, keys in categories.items():
@@ -105,7 +106,9 @@ class PacsSRLogger:
 
         self.logger.info("-" * 80)
 
-    def log_training_start(self, spacing: str, pulse: str, n_patients: int, n_regions: int):
+    def log_training_start(
+        self, spacing: str, pulse: str, n_patients: int, n_regions: int
+    ):
         """
         Log the start of training for a specific configuration.
 
@@ -125,7 +128,13 @@ class PacsSRLogger:
         # Start timer
         self.timers[f"{spacing}_{pulse}_train"] = time.time()
 
-    def log_patient_progress(self, patient_id: str, idx: int, total: int, elapsed_time: Optional[float] = None):
+    def log_patient_progress(
+        self,
+        patient_id: str,
+        idx: int,
+        total: int,
+        elapsed_time: Optional[float] = None,
+    ):
         """
         Log progress during patient processing.
 
@@ -136,12 +145,14 @@ class PacsSRLogger:
             elapsed_time: Optional time taken for this patient (in seconds)
         """
         progress_pct = (idx + 1) / total * 100
-        msg = f"  [{idx+1:3d}/{total:3d}] ({progress_pct:5.1f}%) Processing: {patient_id}"
+        msg = f"  [{idx + 1:3d}/{total:3d}] ({progress_pct:5.1f}%) Processing: {patient_id}"
         if elapsed_time is not None:
             msg += f" | Time: {elapsed_time:.2f}s"
         self.logger.info(msg)
 
-    def log_region_optimization(self, region_id: int, weights: list, objective_value: Optional[float] = None):
+    def log_region_optimization(
+        self, region_id: int, weights: list, objective_value: Optional[float] = None
+    ):
         """
         Log per-region optimization results.
 
@@ -169,11 +180,15 @@ class PacsSRLogger:
         if timer_key in self.timers:
             elapsed = time.time() - self.timers[timer_key]
             self.logger.info("-" * 80)
-            self.logger.info(f"Training completed: {n_regions} regions optimized in {elapsed:.2f}s")
-            self.logger.info(f"Average time per region: {elapsed/n_regions:.4f}s")
+            self.logger.info(
+                f"Training completed: {n_regions} regions optimized in {elapsed:.2f}s"
+            )
+            self.logger.info(f"Average time per region: {elapsed / n_regions:.4f}s")
             del self.timers[timer_key]
 
-    def log_evaluation_start(self, spacing: str, pulse: str, split: str, n_patients: int):
+    def log_evaluation_start(
+        self, spacing: str, pulse: str, split: str, n_patients: int
+    ):
         """
         Log the start of evaluation.
 
@@ -192,7 +207,14 @@ class PacsSRLogger:
         # Start timer
         self.timers[f"{spacing}_{pulse}_eval_{split}"] = time.time()
 
-    def log_patient_metrics(self, patient_id: str, metrics: Dict[str, float], idx: int, total: int, elapsed_time: Optional[float] = None):
+    def log_patient_metrics(
+        self,
+        patient_id: str,
+        metrics: Dict[str, float],
+        idx: int,
+        total: int,
+        elapsed_time: Optional[float] = None,
+    ):
         """
         Log per-patient evaluation metrics.
 
@@ -205,12 +227,14 @@ class PacsSRLogger:
         """
         progress_pct = (idx + 1) / total * 100
         metrics_str = " | ".join([f"{k.upper()}={v:.4f}" for k, v in metrics.items()])
-        msg = f"  [{idx+1:3d}/{total:3d}] ({progress_pct:5.1f}%) {patient_id}: {metrics_str}"
+        msg = f"  [{idx + 1:3d}/{total:3d}] ({progress_pct:5.1f}%) {patient_id}: {metrics_str}"
         if elapsed_time is not None:
             msg += f" | Time: {elapsed_time:.2f}s"
         self.logger.info(msg)
 
-    def log_aggregate_metrics(self, split: str, metrics: Dict[str, float], spacing: str, pulse: str):
+    def log_aggregate_metrics(
+        self, split: str, metrics: Dict[str, float], spacing: str, pulse: str
+    ):
         """
         Log aggregated metrics across all patients.
 
@@ -258,7 +282,9 @@ class PacsSRLogger:
     def log_session_end(self):
         """Log session end."""
         self.logger.info("\n" + "=" * 80)
-        self.logger.info(f"Session completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self.logger.info(
+            f"Session completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        )
         self.logger.info("=" * 80)
 
     def info(self, msg: str):
@@ -272,6 +298,91 @@ class PacsSRLogger:
     def error(self, msg: str):
         """Convenience method for logging errors."""
         self.logger.error(msg)
+
+
+def capture_environment() -> Dict[str, Any]:
+    """Capture a snapshot of the runtime environment for reproducibility.
+
+    Returns a dict with Python version, platform info, installed package
+    versions for core dependencies (numpy, scipy, scikit-image, joblib),
+    and availability of optional packages (ANTs, PyTorch/CUDA). Memory
+    information is included when ``psutil`` is available.
+
+    Returns:
+        Dictionary with string keys mapping to scalars, strings, or None.
+    """
+    import os
+    import platform as _platform
+    import sys as _sys
+
+    env: Dict[str, Any] = {
+        "timestamp": datetime.now().isoformat(),
+        "python_version": _sys.version,
+        "platform": _platform.platform(),
+        "cpu_count": os.cpu_count(),
+    }
+
+    # Memory via psutil (optional)
+    try:
+        import psutil
+
+        mem = psutil.virtual_memory()
+        env["memory_total_gb"] = round(mem.total / (1024**3), 2)
+        env["memory_available_gb"] = round(mem.available / (1024**3), 2)
+    except ImportError:
+        env["memory_total_gb"] = None
+        env["memory_available_gb"] = None
+
+    # Core dependency versions
+    try:
+        import numpy as np
+
+        env["numpy_version"] = np.__version__
+    except ImportError:
+        env["numpy_version"] = None
+
+    try:
+        import scipy
+
+        env["scipy_version"] = scipy.__version__
+    except ImportError:
+        env["scipy_version"] = None
+
+    try:
+        import skimage
+
+        env["skimage_version"] = skimage.__version__
+    except ImportError:
+        env["skimage_version"] = None
+
+    try:
+        import joblib
+
+        env["joblib_version"] = joblib.__version__
+    except ImportError:
+        env["joblib_version"] = None
+
+    # Optional: ANTs
+    try:
+        import ants  # noqa: F401
+
+        env["ants_available"] = True
+    except ImportError:
+        env["ants_available"] = False
+
+    # Optional: PyTorch / CUDA
+    try:
+        import torch
+
+        env["torch_available"] = True
+        env["torch_version"] = torch.__version__
+        env["cuda_available"] = torch.cuda.is_available()
+    except ImportError:
+        env["torch_available"] = False
+        env["torch_version"] = None
+        env["cuda_available"] = None
+
+    return env
 
 
 def setup_experiment_logger(out_dir: Path, experiment_name: str) -> PacsSRLogger:
