@@ -31,7 +31,8 @@ from typing import Tuple
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import Normalize, TwoSlopeNorm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from visualize_glioma_octant import (
@@ -65,8 +66,7 @@ WEIGHTS_NPZ = Path(
 )
 
 OUTPUT_DIR = Path(
-    "/media/mpascual/Sandisk2TB/research/pacs_sr/article/graphical_abstract/"
-    "weight_viz"
+    "/media/mpascual/Sandisk2TB/research/pacs_sr/article/graphical_abstract/weight_viz"
 )
 
 # Octant / camera settings (same as expert comparison for consistency)
@@ -75,7 +75,7 @@ WINDOW_SIZE = (1400, 1200)
 MARGIN = 0.05
 
 # Manual slice overrides (None = auto from tumor centroid)
-SLICE_AXIAL: int | None = None
+SLICE_AXIAL: int | None = 90
 SLICE_CORONAL: int | None = None
 SLICE_SAGITTAL: int | None = None
 
@@ -279,79 +279,235 @@ def find_interesting_patch(
         for y0 in range(0, Y - patch_size + 1, step):
             for x0 in range(0, X - patch_size + 1, step):
                 p = patch_size
-                patch_mask = brain_mask[z0:z0+p, y0:y0+p, x0:x0+p]
+                patch_mask = brain_mask[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p]
                 if patch_mask.mean() < 0.5:
                     continue  # Skip mostly-outside-brain patches
-                score = deviation[z0:z0+p, y0:y0+p, x0:x0+p].mean()
+                score = deviation[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p].mean()
                 if score > best_score:
                     best_score = score
                     best_origin = (z0, y0, x0)
 
-    logger.info(
-        f"  Best patch origin: {best_origin}, "
-        f"mean |w-0.5|={best_score:.4f}"
-    )
+    logger.info(f"  Best patch origin: {best_origin}, mean |w-0.5|={best_score:.4f}")
     return best_origin
 
 
-def render_cube_slices(
+def _draw_cube_edges(
+    ax,
+    color: str = "black",
+    linewidth: float = 0.8,
+) -> None:
+    """Draw the 12 edges of a unit cube on a 3D axes."""
+    verts = np.array(
+        [
+            [0, 0, 0],
+            [1, 0, 0],
+            [1, 1, 0],
+            [0, 1, 0],  # bottom
+            [0, 0, 1],
+            [1, 0, 1],
+            [1, 1, 1],
+            [0, 1, 1],  # top
+        ]
+    )
+    edges = [
+        (0, 1),
+        (1, 2),
+        (2, 3),
+        (3, 0),  # bottom
+        (4, 5),
+        (5, 6),
+        (6, 7),
+        (7, 4),  # top
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),  # vertical
+    ]
+    for i, j in edges:
+        ax.plot3D(
+            [verts[i][0], verts[j][0]],
+            [verts[i][1], verts[j][1]],
+            [verts[i][2], verts[j][2]],
+            color=color,
+            linewidth=linewidth,
+        )
+
+
+def render_3d_cube(
     cube: np.ndarray,
     cmap: str,
     vmin: float,
     vmax: float,
     vcenter: float | None,
-    title: str,
     out_path: Path,
 ) -> None:
-    """Render three orthogonal mid-slices of a cube and save as PNG + PDF.
+    """Render a 3D cube with outer slices textured on three visible faces.
+
+    The three visible faces (top, front, right) are textured with the
+    corresponding outer slices of the input volume. Camera is positioned
+    to show all three faces in an isometric-like projection.
 
     Args:
-        cube: 3D array (patch_size, patch_size, patch_size).
+        cube: 3D array (Z, Y, X).
         cmap: Matplotlib colormap name.
-        vmin: Colorbar minimum.
-        vmax: Colorbar maximum.
+        vmin: Colormap minimum.
+        vmax: Colormap maximum.
         vcenter: If not None, centre the diverging norm here.
-        title: Figure suptitle (empty string for no title).
         out_path: Stem path (without extension).
     """
     p = cube.shape[0]
-    mid = p // 2
 
-    slices = {
-        "Axial": cube[mid, :, :],
-        "Coronal": cube[:, mid, :],
-        "Sagittal": cube[:, :, mid],
-    }
+    # Outer slices for the three visible faces
+    top_slice = cube[-1, :, :]  # Z=max -> top face
+    front_slice = cube[:, 0, :]  # Y=0   -> front face
+    right_slice = cube[:, :, -1]  # X=max -> right face
 
+    # Build normalizer and colormap
     if vcenter is not None:
         norm = TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
     else:
-        norm = None
+        norm = Normalize(vmin=vmin, vmax=vmax)
+    colormap = plt.get_cmap(cmap)
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    for ax, (name, sl) in zip(axes, slices.items()):
-        im = ax.imshow(
-            sl.T,
-            origin="lower",
-            cmap=cmap,
-            vmin=vmin if norm is None else None,
-            vmax=vmax if norm is None else None,
-            norm=norm,
-            interpolation="nearest",
-        )
-        ax.set_title(name, fontsize=10)
-        ax.axis("off")
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection="3d")
 
-    cbar = fig.colorbar(im, ax=axes.tolist(), shrink=0.8, pad=0.02)
-    cbar.ax.tick_params(labelsize=8)
+    # Vertex grid: (p+1) edge coordinates to produce p x p face cells
+    edges = np.linspace(0, 1, p + 1)
 
-    if title:
-        fig.suptitle(title, fontsize=12, y=1.02)
+    def _to_rgba(slice_2d: np.ndarray) -> np.ndarray:
+        """Map a 2D slice to RGBA, padded to (p+1, p+1, 4) for plot_surface."""
+        rgba = np.ones((p + 1, p + 1, 4))
+        rgba[:p, :p] = colormap(norm(slice_2d))
+        return rgba
+
+    # Top face: Z=1, varying X (col) and Y (row)
+    X_t, Y_t = np.meshgrid(edges, edges)
+    Z_t = np.ones_like(X_t)
+    ax.plot_surface(
+        X_t,
+        Y_t,
+        Z_t,
+        facecolors=_to_rgba(top_slice),
+        rstride=1,
+        cstride=1,
+        shade=False,
+        antialiased=False,
+        linewidth=0,
+    )
+
+    # Front face: Y=0, varying X (col) and Z (row)
+    X_f, Z_f = np.meshgrid(edges, edges)
+    Y_f = np.zeros_like(X_f)
+    ax.plot_surface(
+        X_f,
+        Y_f,
+        Z_f,
+        facecolors=_to_rgba(front_slice),
+        rstride=1,
+        cstride=1,
+        shade=False,
+        antialiased=False,
+        linewidth=0,
+    )
+
+    # Right face: X=1, varying Y (col) and Z (row)
+    Y_r, Z_r = np.meshgrid(edges, edges)
+    X_r = np.ones_like(Y_r)
+    ax.plot_surface(
+        X_r,
+        Y_r,
+        Z_r,
+        facecolors=_to_rgba(right_slice),
+        rstride=1,
+        cstride=1,
+        shade=False,
+        antialiased=False,
+        linewidth=0,
+    )
+
+    # Draw cube boundary edges
+    _draw_cube_edges(ax)
+
+    # Camera and style
+    ax.view_init(elev=25, azim=-60)
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_zlim(0, 1)
+    ax.set_box_aspect([1, 1, 1])
+    ax.set_axis_off()
+
+    # Save
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(
+        str(out_path.with_suffix(".png")),
+        dpi=300,
+        bbox_inches="tight",
+        transparent=True,
+        pad_inches=0,
+    )
+    fig.savefig(
+        str(out_path.with_suffix(".pdf")),
+        bbox_inches="tight",
+        pad_inches=0,
+    )
+    plt.close(fig)
+    logger.info(f"  Saved: {out_path.with_suffix('.png').name}")
+
+
+def generate_standalone_colorbar(
+    cmap: str,
+    vmin: float,
+    vmax: float,
+    vcenter: float | None,
+    model_names: list[str],
+    out_path: Path,
+    orientation: str = "horizontal",
+) -> None:
+    """Generate a standalone colorbar image (no data plot).
+
+    Args:
+        cmap: Matplotlib colormap name.
+        vmin: Colormap minimum.
+        vmax: Colormap maximum.
+        vcenter: If not None, centre the diverging norm here.
+        model_names: Expert model names for tick labels.
+        out_path: Stem path (without extension).
+        orientation: 'horizontal' or 'vertical'.
+    """
+    if vcenter is not None:
+        norm = TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
+    else:
+        norm = Normalize(vmin=vmin, vmax=vmax)
+
+    sm = ScalarMappable(cmap=cmap, norm=norm)
+    sm.set_array([])
+
+    e1 = model_names[0] if len(model_names) > 0 else "Expert1"
+    e2 = model_names[1] if len(model_names) > 1 else "Expert2"
+
+    if orientation == "horizontal":
+        fig, ax = plt.subplots(figsize=(6, 0.5))
+    else:
+        fig, ax = plt.subplots(figsize=(0.5, 6))
+
+    cbar = fig.colorbar(sm, cax=ax, orientation=orientation)
+    cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
+    cbar.set_ticklabels([f"1.0 {e1}", "0.75", "0.5 (equal)", "0.75", f"1.0 {e2}"])
+    cbar.ax.tick_params(labelsize=9)
 
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(str(out_path.with_suffix(".png")), dpi=200, bbox_inches="tight")
-    fig.savefig(str(out_path.with_suffix(".pdf")), bbox_inches="tight")
+    fig.savefig(
+        str(out_path.with_suffix(".png")),
+        dpi=300,
+        bbox_inches="tight",
+        transparent=True,
+    )
+    fig.savefig(
+        str(out_path.with_suffix(".pdf")),
+        bbox_inches="tight",
+    )
     plt.close(fig)
     logger.info(f"  Saved: {out_path.with_suffix('.png').name}")
 
@@ -363,7 +519,7 @@ def generate_patch_cubes(
     brain_mask: np.ndarray,
     output_dir: Path,
 ) -> None:
-    """Extract and render patch cubes for MRI and weight maps."""
+    """Extract and render 3D patch cubes for MRI and weight maps."""
     p = PATCH_SIZE
 
     if PATCH_ORIGIN is not None:
@@ -373,77 +529,49 @@ def generate_patch_cubes(
 
     logger.info(f"Patch cube origin: ({z0}, {y0}, {x0}), size: {p}")
 
-    mri_cube = hr_vol[z0:z0+p, y0:y0+p, x0:x0+p]
+    mri_cube = hr_vol[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p]
     w_diff = compute_weight_difference(weight_maps)
-    weight_cube = w_diff[z0:z0+p, y0:y0+p, x0:x0+p]
+    weight_cube = w_diff[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p]
 
-    # MRI cube — grayscale
-    render_cube_slices(
+    # MRI 3D cube — grayscale, no colorbar
+    render_3d_cube(
         mri_cube,
         cmap="gray",
         vmin=float(np.nanpercentile(mri_cube, 1)),
         vmax=float(np.nanpercentile(mri_cube, 99)),
         vcenter=None,
-        title="",
         out_path=output_dir / f"{PATIENT_ID}_{SPACING}_patch_mri",
     )
 
-    # Weight cube — diverging cmap centred at 0.5
-    e1 = model_names[0] if len(model_names) > 0 else "Expert1"
-    e2 = model_names[1] if len(model_names) > 1 else "Expert2"
-
-    render_cube_slices(
+    # Weight 3D cube — diverging cmap, no colorbar in image
+    render_3d_cube(
         weight_cube,
         cmap=WEIGHT_CMAP,
         vmin=0.0,
         vmax=1.0,
         vcenter=0.5,
-        title="",
         out_path=output_dir / f"{PATIENT_ID}_{SPACING}_patch_weight",
     )
 
-    # Also save a combined figure with cbar labels
-    fig, axes = plt.subplots(2, 3, figsize=(12, 8))
-
-    mid = p // 2
-    plane_names = ["Axial", "Coronal", "Sagittal"]
-    mri_slices = [mri_cube[mid, :, :], mri_cube[:, mid, :], mri_cube[:, :, mid]]
-    w_slices = [weight_cube[mid, :, :], weight_cube[:, mid, :], weight_cube[:, :, mid]]
-
-    mri_vmin = float(np.nanpercentile(mri_cube, 1))
-    mri_vmax = float(np.nanpercentile(mri_cube, 99))
-    w_norm = TwoSlopeNorm(vmin=0.0, vcenter=0.5, vmax=1.0)
-
-    for col in range(3):
-        # MRI row
-        axes[0, col].imshow(
-            mri_slices[col].T, origin="lower", cmap="gray",
-            vmin=mri_vmin, vmax=mri_vmax, interpolation="nearest",
-        )
-        axes[0, col].set_title(plane_names[col], fontsize=10)
-        axes[0, col].axis("off")
-
-        # Weight row
-        im = axes[1, col].imshow(
-            w_slices[col].T, origin="lower", cmap=WEIGHT_CMAP,
-            norm=w_norm, interpolation="nearest",
-        )
-        axes[1, col].axis("off")
-
-    axes[0, 0].set_ylabel("MRI", fontsize=11)
-    axes[1, 0].set_ylabel("Weight", fontsize=11)
-
-    cbar = fig.colorbar(im, ax=axes[1, :].tolist(), shrink=0.8, pad=0.04)
-    cbar.set_ticks([0.0, 0.25, 0.5, 0.75, 1.0])
-    cbar.set_ticklabels([f"1.0 {e1}", "0.75", "0.5 (equal)", "0.75", f"1.0 {e2}"])
-    cbar.ax.tick_params(labelsize=8)
-
-    fig.tight_layout()
-    out = output_dir / f"{PATIENT_ID}_{SPACING}_patch_combined"
-    fig.savefig(str(out.with_suffix(".png")), dpi=200, bbox_inches="tight")
-    fig.savefig(str(out.with_suffix(".pdf")), bbox_inches="tight")
-    plt.close(fig)
-    logger.info(f"  Saved: {out.with_suffix('.png').name}")
+    # Standalone colorbars for the weight cube (separate images)
+    generate_standalone_colorbar(
+        cmap=WEIGHT_CMAP,
+        vmin=0.0,
+        vmax=1.0,
+        vcenter=0.5,
+        model_names=model_names,
+        out_path=output_dir / f"{PATIENT_ID}_{SPACING}_weight_colorbar_horizontal",
+        orientation="horizontal",
+    )
+    generate_standalone_colorbar(
+        cmap=WEIGHT_CMAP,
+        vmin=0.0,
+        vmax=1.0,
+        vcenter=0.5,
+        model_names=model_names,
+        out_path=output_dir / f"{PATIENT_ID}_{SPACING}_weight_colorbar_vertical",
+        orientation="vertical",
+    )
 
 
 # =============================================================================
@@ -463,10 +591,7 @@ def main() -> None:
     # Load weight maps
     logger.info(f"Loading weight maps: {WEIGHTS_NPZ}")
     weight_maps, model_names = load_weight_maps(WEIGHTS_NPZ)
-    logger.info(
-        f"  Weight shape: {weight_maps.shape}, "
-        f"experts: {model_names}"
-    )
+    logger.info(f"  Weight shape: {weight_maps.shape}, experts: {model_names}")
 
     # Ensure weight maps match HR volume shape
     if weight_maps.shape[:3] != hr_vol.shape:
