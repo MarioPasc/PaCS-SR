@@ -69,8 +69,8 @@ OUTPUT_DIR = Path(
     "/media/mpascual/Sandisk2TB/research/pacs_sr/article/graphical_abstract/weight_viz"
 )
 
-# Octant / camera settings (same as expert comparison for consistency)
-ZOOM = 2.5
+# Octant / camera settings (same zoom as anisotropy/sr_methods figures)
+ZOOM = 3.8
 WINDOW_SIZE = (1400, 1200)
 MARGIN = 0.05
 
@@ -512,6 +512,81 @@ def generate_standalone_colorbar(
     logger.info(f"  Saved: {out_path.with_suffix('.png').name}")
 
 
+def find_diverse_patches(
+    weight_maps: np.ndarray,
+    brain_mask: np.ndarray,
+    patch_size: int,
+    n_patches: int = 3,
+    min_distance: int = 40,
+    seed: int = 42,
+) -> list[Tuple[int, int, int]]:
+    """Find diverse, brain-interior patches with varied weight distributions.
+
+    Selects patches that are (a) mostly inside the brain, (b) spatially
+    separated by at least ``min_distance`` voxels, and (c) span a range of
+    weight deviation levels.
+
+    Args:
+        weight_maps: 4D array (Z, Y, X, n_models).
+        brain_mask: 3D boolean brain mask.
+        patch_size: Cube side length.
+        n_patches: Number of patches to return.
+        min_distance: Minimum L2 distance between patch centres.
+        seed: Random seed for reproducibility.
+
+    Returns:
+        List of (z0, y0, x0) origins.
+    """
+    rng = np.random.default_rng(seed)
+    w_diff = compute_weight_difference(weight_maps)
+    w_diff[~brain_mask] = 0.5
+
+    deviation = np.abs(w_diff - 0.5)
+    Z, Y, X = w_diff.shape
+    p = patch_size
+    step = max(1, p // 2)
+
+    # Score all candidate patches
+    candidates: list[Tuple[float, Tuple[int, int, int]]] = []
+    for z0 in range(0, Z - p + 1, step):
+        for y0 in range(0, Y - p + 1, step):
+            for x0 in range(0, X - p + 1, step):
+                patch_mask = brain_mask[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p]
+                if patch_mask.mean() < 0.7:
+                    continue
+                score = deviation[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p].mean()
+                candidates.append((score, (z0, y0, x0)))
+
+    # Sort by score and pick diverse set
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    selected: list[Tuple[int, int, int]] = []
+    for _, origin in candidates:
+        centre = np.array(origin) + p // 2
+        if all(
+            np.linalg.norm(centre - (np.array(s) + p // 2)) >= min_distance
+            for s in selected
+        ):
+            selected.append(origin)
+        if len(selected) >= n_patches:
+            break
+
+    # If we couldn't fill via diversity, add random brain-interior patches
+    while len(selected) < n_patches and candidates:
+        _, origin = candidates[rng.integers(len(candidates))]
+        centre = np.array(origin) + p // 2
+        if all(
+            np.linalg.norm(centre - (np.array(s) + p // 2)) >= min_distance // 2
+            for s in selected
+        ):
+            selected.append(origin)
+
+    logger.info(f"  Selected {len(selected)} diverse patches")
+    for idx, s in enumerate(selected):
+        logger.info(f"    Patch {idx}: origin={s}")
+    return selected
+
+
 def generate_patch_cubes(
     hr_vol: np.ndarray,
     weight_maps: np.ndarray,
@@ -521,39 +596,49 @@ def generate_patch_cubes(
 ) -> None:
     """Extract and render 3D patch cubes for MRI and weight maps."""
     p = PATCH_SIZE
-
-    if PATCH_ORIGIN is not None:
-        z0, y0, x0 = PATCH_ORIGIN
-    else:
-        z0, y0, x0 = find_interesting_patch(weight_maps, brain_mask, p)
-
-    logger.info(f"Patch cube origin: ({z0}, {y0}, {x0}), size: {p}")
-
-    mri_cube = hr_vol[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p]
     w_diff = compute_weight_difference(weight_maps)
-    weight_cube = w_diff[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p]
 
-    # MRI 3D cube — grayscale, no colorbar
-    render_3d_cube(
-        mri_cube,
-        cmap="gray",
-        vmin=float(np.nanpercentile(mri_cube, 1)),
-        vmax=float(np.nanpercentile(mri_cube, 99)),
-        vcenter=None,
-        out_path=output_dir / f"{PATIENT_ID}_{SPACING}_patch_mri",
+    # --- Primary patch (most extreme weights) ---
+    if PATCH_ORIGIN is not None:
+        primary_origin = PATCH_ORIGIN
+    else:
+        primary_origin = find_interesting_patch(weight_maps, brain_mask, p)
+
+    all_origins = [("patch", primary_origin)]
+
+    # --- Additional diverse patches ---
+    extra_origins = find_diverse_patches(
+        weight_maps, brain_mask, p, n_patches=3, min_distance=40
     )
+    for idx, origin in enumerate(extra_origins):
+        all_origins.append((f"patch_extra{idx + 1}", origin))
 
-    # Weight 3D cube — diverging cmap, no colorbar in image
-    render_3d_cube(
-        weight_cube,
-        cmap=WEIGHT_CMAP,
-        vmin=0.0,
-        vmax=1.0,
-        vcenter=0.5,
-        out_path=output_dir / f"{PATIENT_ID}_{SPACING}_patch_weight",
-    )
+    # Render each patch pair (MRI + weight cube)
+    for label, (z0, y0, x0) in all_origins:
+        logger.info(f"  Rendering {label} at ({z0}, {y0}, {x0})...")
 
-    # Standalone colorbars for the weight cube (separate images)
+        mri_cube = hr_vol[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p]
+        weight_cube = w_diff[z0 : z0 + p, y0 : y0 + p, x0 : x0 + p]
+
+        render_3d_cube(
+            mri_cube,
+            cmap="gray",
+            vmin=float(np.nanpercentile(mri_cube, 1)),
+            vmax=float(np.nanpercentile(mri_cube, 99)),
+            vcenter=None,
+            out_path=output_dir / f"{PATIENT_ID}_{SPACING}_{label}_mri",
+        )
+
+        render_3d_cube(
+            weight_cube,
+            cmap=WEIGHT_CMAP,
+            vmin=0.0,
+            vmax=1.0,
+            vcenter=0.5,
+            out_path=output_dir / f"{PATIENT_ID}_{SPACING}_{label}_weight",
+        )
+
+    # Standalone colorbars (once)
     generate_standalone_colorbar(
         cmap=WEIGHT_CMAP,
         vmin=0.0,
